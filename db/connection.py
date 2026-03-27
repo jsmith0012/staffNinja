@@ -9,12 +9,15 @@ class Database:
     async def connect(cls):
         settings = get_settings()
         try:
+            ssl_mode = settings.POSTGRES_SSL.strip().lower()
+            ssl_value = None if ssl_mode in {"", "disable", "false", "0"} else ssl_mode
             cls._pool = await asyncpg.create_pool(
                 host=settings.POSTGRES_HOST,
                 port=settings.POSTGRES_PORT,
                 user=settings.POSTGRES_USER,
                 password=settings.POSTGRES_PASSWORD,
                 database=settings.POSTGRES_DB,
+                ssl=ssl_value,
                 min_size=1,
                 max_size=5,
             )

@@ -6,6 +6,7 @@ A modular, maintainable Discord bot for Anime Nebraskon staff support.
 - Staff status tracking
 - Reminders and nudges
 - Organization tools
+- Slash command group `/staffninja` with initial health/help commands
 - Safe PostgreSQL integration
 - Modular cogs/services
 - AI/agent framework (future)
@@ -20,6 +21,14 @@ A modular, maintainable Discord bot for Anime Nebraskon staff support.
 - All features are modular cogs in `bot/cogs/`.
 - Database access is via the `db/` layer. Only add new tables with clear namespacing.
 - AI and agent features are stubs/TODOs for now.
+- Local edits upload to the Linux host via VS Code SFTP on save.
+- Rapid remote test loop from this workspace: run the VS Code tasks `Remote: pytest all`, `Remote: pytest current file`, or `Remote: pytest custom`.
+- One-time remote setup for tests: run `Remote: install test deps` to install `pytest` into `/home/jsmith/staffNinja/.venv`.
+- Slash commands are synced to `DISCORD_GUILD_ID` on startup for fast command updates.
+
+## Slash Commands
+- `/staffninja server`: Ephemeral server health status (service process, Discord gateway, DB check, host, uptime).
+- `/staffninja help`: Ephemeral list of supported slash commands.
 
 ## Testing
 - Unit tests: `pytest tests/`
