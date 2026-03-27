@@ -9,12 +9,15 @@ from utils.logging import setup_logging
 settings = get_settings()
 setup_logging(settings.LOG_LEVEL)
 ALLOWED_GUILD_ID = int(settings.DISCORD_GUILD_ID)
+COMMAND_RESYNC_MINUTES = max(1, int(getattr(settings, "COMMAND_RESYNC_MINUTES", 30)))
 
 intents = discord.Intents.default()
 intents.members = settings.DISCORD_INTENTS_MEMBERS
 intents.message_content = settings.DISCORD_INTENTS_MESSAGE_CONTENT
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+sync_lock = asyncio.Lock()
+periodic_resync_task: asyncio.Task | None = None
 
 # Load cogs dynamically
 async def load_cogs():
@@ -24,25 +27,54 @@ async def load_cogs():
         except Exception as e:
             logging.error(f"Failed to load cog {cog}: {e}")
 
+
+async def sync_app_commands(reason: str):
+    async with sync_lock:
+        try:
+            guild = discord.Object(id=ALLOWED_GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+
+            # Keep global command set empty so slash commands are not available outside the allowed guild.
+            bot.tree.clear_commands(guild=None)
+            cleared = await bot.tree.sync()
+
+            logging.info(
+                "Command sync complete: reason=%s guild_id=%s guild_count=%s global_count=%s",
+                reason,
+                ALLOWED_GUILD_ID,
+                len(synced),
+                len(cleared),
+            )
+        except Exception as exc:
+            logging.exception("Guild command sync failed for %s reason=%s: %s", ALLOWED_GUILD_ID, reason, exc)
+
+
+async def periodic_command_resync_loop():
+    while not bot.is_closed():
+        await asyncio.sleep(COMMAND_RESYNC_MINUTES * 60)
+        await sync_app_commands("periodic")
+
 @bot.event
 async def on_ready():
+    global periodic_resync_task
+
     if not hasattr(bot, "launch_time"):
         bot.launch_time = discord.utils.utcnow()
 
-    try:
-        guild = discord.Object(id=ALLOWED_GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        logging.info(f"Synced {len(synced)} app commands to guild {ALLOWED_GUILD_ID}")
+    await sync_app_commands("on_ready")
 
-        # Keep global command set empty so slash commands are not available outside the allowed guild.
-        bot.tree.clear_commands(guild=None)
-        cleared = await bot.tree.sync()
-        logging.info(f"Synced {len(cleared)} global app commands (expected 0)")
-    except Exception as exc:
-        logging.exception(f"Guild command sync failed for {ALLOWED_GUILD_ID}: {exc}")
+    if periodic_resync_task is None or periodic_resync_task.done():
+        periodic_resync_task = asyncio.create_task(periodic_command_resync_loop())
+        logging.info("Started periodic command resync loop: interval_minutes=%s", COMMAND_RESYNC_MINUTES)
 
     logging.info(f"Logged in as {bot.user}")
+
+
+@bot.event
+async def on_resumed():
+    logging.warning("Gateway resumed; triggering command resync")
+    await sync_app_commands("on_resumed")
 
 
 @bot.check
