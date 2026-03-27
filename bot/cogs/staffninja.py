@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from ai.provider import get_provider
 from config.settings import get_settings
 from db.connection import Database
 
@@ -20,6 +21,17 @@ class StaffNinjaGroup(app_commands.Group):
 
     def __init__(self):
         super().__init__(name="staffninja", description="staffNinja bot commands")
+
+    @staticmethod
+    def _format_event_timestamp(value):
+        if value is None:
+            return "(none)"
+
+        try:
+            timestamp = int(value)
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            return str(value)
 
     @staticmethod
     def _send_verification_email(recipient_email: str, code: str):
@@ -76,9 +88,95 @@ class StaffNinjaGroup(app_commands.Group):
             "staffNinja slash command help",
             "- /staffninja server: private health report for bot/server/db status",
             "- /staffninja help: this command list",
-            "- /staffninja staff: your staff profile/status from the User table",
+            "- /staffninja status: your staff profile/status from the User table",
+            "- /staffninja event: active event status and related metrics",
+            "- /eventninja policy <question>: answers from Document table excerpts only",
             "- /staffninja link email:<you@example.com>: sends a verification code to your email",
             "- /staffninja verify code:<123456>: verifies code and links your Discord account",
+        ]
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="event", description="Show event status and related metrics")
+    async def event(self, interaction: discord.Interaction):
+        status_map = {
+            0: "inactive",
+            1: "active",
+        }
+
+        try:
+            event_rows = await Database.fetch(
+                'SELECT "Id", "Name", "Status", "Start", "End", "EventBriteId", "VenueId", "StaffAgreementFormId" FROM "Event" WHERE "Status" = 1 ORDER BY "Id" DESC LIMIT 1'
+            )
+        except Exception as exc:
+            logging.exception("Failed event lookup")
+            await interaction.response.send_message(
+                f"Event lookup failed: {exc.__class__.__name__}",
+                ephemeral=True,
+            )
+            return
+
+        if not event_rows:
+            await interaction.response.send_message(
+                "No active event found (Status = 1).",
+                ephemeral=True,
+            )
+            return
+
+        event = event_rows[0]
+        selected_event_id = event["Id"]
+
+        try:
+            metrics = await Database.fetch(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM "AttendeeBadge" WHERE "EventId" = $1) AS attendee_badges,
+                    (SELECT COUNT(*) FROM "Budget" WHERE "EventId" = $1) AS budgets,
+                    (SELECT COUNT(*) FROM "Panel" WHERE "EventId" = $1) AS panels,
+                    (SELECT COUNT(*) FROM "StaffShift" WHERE "EventId" = $1) AS staff_shifts,
+                    (SELECT COUNT(*) FROM "UserEventPreferences" WHERE "EventId" = $1) AS user_preferences,
+                    (SELECT COUNT(*) FROM "Transaction" WHERE "EventId" = $1) AS transactions,
+                    (SELECT COUNT(*) FROM "conExpenseBudget" WHERE "sysEventId" = $1) AS expense_budgets,
+                    (SELECT COUNT(*) FROM "deprecated_regBadge" WHERE "eventId" = $1) AS legacy_badges,
+                    (SELECT COUNT(*) FROM "schSchedule" WHERE "sysEventId" = $1) AS schedules,
+                    (SELECT COUNT(*) FROM "stfEvent" WHERE "eventId" = $1) AS staff_events,
+                    (SELECT COUNT(*) FROM "volAwarded" WHERE "eventId" = $1) AS volunteer_awards,
+                    (SELECT COUNT(*) FROM "volHours" WHERE "eventId" = $1) AS volunteer_hours,
+                    (SELECT COUNT(*) FROM "volRewards" WHERE "eventId" = $1) AS volunteer_rewards
+                """,
+                selected_event_id,
+            )
+            venue = await Database.fetch(
+                'SELECT COALESCE("Name", \'(none)\') AS venue_name FROM "Venue" WHERE "Id" = $1 LIMIT 1',
+                event["VenueId"],
+            )
+        except Exception as exc:
+            logging.exception("Failed event metrics lookup event_id=%s", selected_event_id)
+            await interaction.response.send_message(
+                f"Event metrics lookup failed: {exc.__class__.__name__}",
+                ephemeral=True,
+            )
+            return
+
+        metric = metrics[0]
+        venue_name = venue[0]["venue_name"] if venue else "(none)"
+        status_code = int(event["Status"]) if event["Status"] is not None else -1
+        status_label = status_map.get(status_code, f"unknown ({status_code})")
+
+        lines = [
+            "staffNinja event status",
+            f"- event id: {selected_event_id}",
+            f"- name: {event['Name']}",
+            f"- status: {status_label}",
+            f"- start: {self._format_event_timestamp(event['Start'])}",
+            f"- end: {self._format_event_timestamp(event['End'])}",
+            f"- eventbrite id: {event['EventBriteId'] if event['EventBriteId'] else '(none)'}",
+            f"- venue: {venue_name}",
+            f"- staff agreement form id: {event['StaffAgreementFormId'] if event['StaffAgreementFormId'] else '(none)'}",
+            "- related table metrics:",
+            f"  attendee badges={metric['attendee_badges']}, budgets={metric['budgets']}, panels={metric['panels']}, staff shifts={metric['staff_shifts']}",
+            f"  user prefs={metric['user_preferences']}, transactions={metric['transactions']}, schedules={metric['schedules']}",
+            f"  expense budgets={metric['expense_budgets']}, legacy badges={metric['legacy_badges']}, staff events={metric['staff_events']}",
+            f"  volunteer awards={metric['volunteer_awards']}, volunteer hours={metric['volunteer_hours']}, volunteer rewards={metric['volunteer_rewards']}",
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -320,14 +418,326 @@ class StaffNinjaGroup(app_commands.Group):
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
+class EventNinjaGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="eventninja", description="Event policy commands")
+
+    @staticmethod
+    def _truncate(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3] + "..."
+
+    @staticmethod
+    def _extract_relevant_section(text: str, terms: list[str], section_size: int = 700) -> str:
+        if not text:
+            return ""
+
+        compact = str(text).replace("\r", "")
+        lowered = compact.lower()
+        match_positions = [lowered.find(term) for term in terms if term and lowered.find(term) >= 0]
+
+        if not match_positions:
+            return compact[:section_size]
+
+        first_match = min(match_positions)
+        start = max(0, first_match - (section_size // 3))
+        end = min(len(compact), start + section_size)
+        return compact[start:end]
+
+    @staticmethod
+    def _build_policy_search_query(question: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (question or "").lower())
+        tokens = [t for t in cleaned.split() if len(t) >= 4]
+
+        expanded_terms = set(tokens)
+        if any(t in expanded_terms for t in {"drunk", "drink", "drinking", "alcohol", "intoxicated", "intoxication"}):
+            expanded_terms.update({"alcohol", "intoxicated", "intoxication", "sobriety", "conduct", "behavior", "safety"})
+
+        if any(t in expanded_terms for t in {"harass", "harassment", "hostile"}):
+            expanded_terms.update({"harassment", "conduct", "behavior", "safety"})
+
+        ordered = sorted(expanded_terms)
+        return " ".join(ordered) if ordered else question
+
+    @app_commands.command(name="policy", description="Answer policy questions from Document table content")
+    @app_commands.describe(question="Policy question to answer from documents")
+    async def policy(self, interaction: discord.Interaction, question: str):
+        clean_question = (question or "").strip()
+        search_query = self._build_policy_search_query(clean_question)
+        user_id = getattr(interaction.user, "id", None)
+        guild_id = interaction.guild_id
+        channel_id = interaction.channel_id
+
+        logging.info(
+            "Policy question received: user_id=%s guild_id=%s channel_id=%s question=%s",
+            user_id,
+            guild_id,
+            channel_id,
+            clean_question,
+        )
+
+        if not clean_question:
+            logging.info(
+                "Policy question rejected (empty input): user_id=%s guild_id=%s channel_id=%s",
+                user_id,
+                guild_id,
+                channel_id,
+            )
+            await interaction.response.send_message(
+                "Please provide a policy question.",
+                ephemeral=True,
+            )
+            return
+
+        provider_name = (settings.AI_PROVIDER or "").strip().lower()
+        provider_cls = get_provider(provider_name)
+        if not provider_cls:
+            logging.error(
+                "Policy question failed: provider not registered user_id=%s provider=%s",
+                user_id,
+                provider_name,
+            )
+            await interaction.response.send_message(
+                f"AI provider '{provider_name}' is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        logging.debug(
+            "Policy search initialized: user_id=%s provider=%s search_query=%s",
+            user_id,
+            provider_name,
+            search_query,
+        )
+
+        used_fallback = False
+        like_terms: list[str] = []
+        try:
+            docs = await Database.fetch(
+                """
+                SELECT
+                    "Id",
+                    COALESCE("Title", '') AS title,
+                    COALESCE("Category", '') AS category,
+                    COALESCE("Version", '') AS version,
+                    COALESCE("DocumentValue", '') AS document_value,
+                    ts_rank_cd(
+                        to_tsvector(
+                            'english',
+                            COALESCE("Title", '') || ' ' || COALESCE("Category", '') || ' ' || COALESCE("DocumentValue", '')
+                        ),
+                        plainto_tsquery('english', $1)
+                    ) AS rank
+                FROM "Document"
+                WHERE to_tsvector(
+                        'english',
+                        COALESCE("Title", '') || ' ' || COALESCE("Category", '') || ' ' || COALESCE("DocumentValue", '')
+                    ) @@ plainto_tsquery('english', $1)
+                ORDER BY rank DESC, "EditedDate" DESC NULLS LAST
+                LIMIT 20
+                """,
+                search_query,
+            )
+            logging.debug(
+                "Policy full-text lookup completed: user_id=%s doc_count=%s",
+                user_id,
+                len(docs),
+            )
+        except Exception as exc:
+            logging.exception("Policy document lookup failed")
+            await interaction.response.send_message(
+                f"Document lookup failed: {exc.__class__.__name__}",
+                ephemeral=True,
+            )
+            return
+
+        if not docs:
+            # Fallback for natural-language phrasing that may miss full-text search tokenization.
+            tokens = [t for t in search_query.replace("\n", " ").split(" ") if len(t.strip()) >= 4][:12]
+            like_terms = [f"%{t.strip()}%" for t in tokens if t.strip()]
+            if like_terms:
+                used_fallback = True
+                try:
+                    docs = await Database.fetch(
+                        """
+                        SELECT
+                            "Id",
+                            COALESCE("Title", '') AS title,
+                            COALESCE("Category", '') AS category,
+                            COALESCE("Version", '') AS version,
+                            COALESCE("DocumentValue", '') AS document_value,
+                            0.0::float AS rank
+                        FROM "Document"
+                        WHERE COALESCE("Title", '') ILIKE ANY($1::text[])
+                           OR COALESCE("Category", '') ILIKE ANY($1::text[])
+                           OR COALESCE("DocumentValue", '') ILIKE ANY($1::text[])
+                        ORDER BY "EditedDate" DESC NULLS LAST
+                        LIMIT 20
+                        """,
+                        like_terms,
+                    )
+                    logging.debug(
+                        "Policy fallback lookup completed: user_id=%s like_terms=%s doc_count=%s",
+                        user_id,
+                        like_terms,
+                        len(docs),
+                    )
+                except Exception as exc:
+                    logging.exception("Policy document fallback lookup failed")
+                    await interaction.response.send_message(
+                        f"Document lookup failed: {exc.__class__.__name__}",
+                        ephemeral=True,
+                    )
+                    return
+
+        if not docs:
+            logging.info(
+                "Policy question had no matching docs: user_id=%s search_query=%s used_fallback=%s like_terms=%s",
+                user_id,
+                search_query,
+                used_fallback,
+                like_terms,
+            )
+            await interaction.response.send_message(
+                "I can only answer from the Document table and found no matching policy text.",
+                ephemeral=True,
+            )
+            return
+
+        search_terms = [t.strip().lower() for t in search_query.split(" ") if t.strip()]
+        context_chunks = []
+        sources = []
+        allowed_doc_ids = []
+        doc_debug_rows = []
+        for row in docs:
+            doc_id = int(row["Id"])
+            title = row["title"] or "(untitled)"
+            category = row["category"] or "(uncategorized)"
+            version = row["version"] or "(none)"
+            excerpt = self._truncate(
+                self._extract_relevant_section(str(row["document_value"]), search_terms, section_size=700),
+                700,
+            )
+            context_chunks.append(
+                f"[Document Id: {doc_id}] Title: {title}\nCategory: {category}\nVersion: {version}\nRelevant section:\n{excerpt}"
+            )
+            sources.append(f"{doc_id}:{title}")
+            allowed_doc_ids.append(str(doc_id))
+            doc_debug_rows.append(
+                {
+                    "id": doc_id,
+                    "title": title,
+                    "category": category,
+                    "version": version,
+                    "rank": float(row["rank"]) if row["rank"] is not None else None,
+                    "document_len": len(str(row["document_value"])),
+                    "chunk_len": len(excerpt),
+                }
+            )
+
+        logging.debug(
+            "Policy context prepared: user_id=%s doc_count=%s used_fallback=%s docs=%s",
+            user_id,
+            len(docs),
+            used_fallback,
+            doc_debug_rows,
+        )
+
+        prompt = (
+            "You are a policy locator. Use ONLY the provided document excerpts from the database. "
+            "Do not use prior knowledge, web data, or any source not included below. "
+            "Do NOT answer hypothetical scenarios directly (for example, do not state what punishment would happen). "
+            "Do NOT infer outcomes, discipline, or consequences that are not explicitly written in the excerpts. "
+            "Instead, identify the most relevant policies and explain why each is relevant to the user's question.\n\n"
+            "Response format rules:\n"
+            "1) Start with: Relevant policies\n"
+            "2) Return 1-4 bullet lines in this exact style: - Doc <id> | <title> | relevance: <short reason>\n"
+            "3) If no excerpt directly addresses the question, include: - No direct policy match found in provided excerpts.\n"
+            "4) Optionally add one final line starting with: Clarify: <question> if the policy text is ambiguous\n"
+            "5) If excerpts are insufficient, reply exactly: I can only answer from the Document table and the provided excerpts are insufficient.\n\n"
+            f"Only use document IDs from this allowed list when citing: {', '.join(allowed_doc_ids)}\n\n"
+            f"User question:\n{clean_question}\n\n"
+            "Document excerpts:\n"
+            + "\n\n---\n\n".join(context_chunks)
+        )
+
+        logging.debug(
+            "Policy prompt prepared: user_id=%s prompt_chars=%s allowed_doc_ids=%s",
+            user_id,
+            len(prompt),
+            allowed_doc_ids,
+        )
+
+        try:
+            try:
+                provider = provider_cls(endpoint=settings.AI_ENDPOINT)
+            except TypeError:
+                provider = provider_cls()
+
+            answer = await provider.complete(prompt)
+            logging.debug(
+                "Policy AI completion succeeded: user_id=%s raw_answer_chars=%s",
+                user_id,
+                len((answer or "")),
+            )
+        except Exception as exc:
+            logging.exception("Policy AI completion failed")
+            await interaction.response.send_message(
+                f"AI policy response failed: {exc.__class__.__name__}",
+                ephemeral=True,
+            )
+            return
+
+        final_answer = self._truncate((answer or "").strip() or "(no response)", 1600)
+        source_line = self._truncate(", ".join(sources), 500)
+        safe_question = self._truncate(clean_question, 300)
+        template_header = "eventNinja policy matches"
+        template_question = f"- question: {safe_question}"
+        template_sources = f"- source documents scanned: {source_line}"
+        fixed_size = len(template_header) + len(template_question) + len(template_sources) + len("- relevant policies:\n") + 12
+        max_answer_len = max(200, 1900 - fixed_size)
+        safe_answer = self._truncate(final_answer, max_answer_len)
+
+        lines = [
+            template_header,
+            template_question,
+            f"- relevant policies:\n{safe_answer}",
+            template_sources,
+        ]
+        combined = "\n".join(lines)
+        if len(combined) > 1900:
+            overflow = len(combined) - 1900
+            safe_answer = self._truncate(safe_answer, max(200, len(safe_answer) - overflow - 5))
+            lines = [
+                template_header,
+                template_question,
+                f"- relevant policies:\n{safe_answer}",
+                template_sources,
+            ]
+
+        logging.info(
+            "Policy response sent: user_id=%s guild_id=%s channel_id=%s question=%s response=%s",
+            user_id,
+            guild_id,
+            channel_id,
+            safe_question,
+            safe_answer,
+        )
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
 class StaffNinjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.group = StaffNinjaGroup()
+        self.eventninja_group = EventNinjaGroup()
         self.bot.tree.add_command(self.group)
+        self.bot.tree.add_command(self.eventninja_group)
 
     def cog_unload(self):
         self.bot.tree.remove_command(self.group.name, type=self.group.type)
+        self.bot.tree.remove_command(self.eventninja_group.name, type=self.eventninja_group.type)
 
 
 async def setup(bot: commands.Bot):
