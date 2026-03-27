@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     DISCORD_CLIENT_SECRET: str | None = None
     DISCORD_INTENTS_MEMBERS: bool = False
     DISCORD_INTENTS_MESSAGE_CONTENT: bool = False
+    EMAIL_SMTP_HOST: str = "smtp.gmail.com"
+    EMAIL_SMTP_PORT: int = 465
+    EMAIL_SMTP_USERNAME: str | None = None
+    EMAIL_SMTP_PASSWORD: str | None = None
+    EMAIL_FROM: str | None = None
+    LINK_CODE_TTL_MINUTES: int = 10
+    LINK_CODE_MAX_ATTEMPTS: int = 5
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str
