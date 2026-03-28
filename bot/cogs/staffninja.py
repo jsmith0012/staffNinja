@@ -1,3 +1,5 @@
+import asyncio
+import re
 import socket
 from datetime import datetime, timezone
 import logging
@@ -191,6 +193,9 @@ class StaffNinjaGroup(app_commands.Group):
             )
             return
 
+        # Defer immediately before any I/O — DB lookup + SMTP can exceed Discord's 3s window
+        await interaction.response.defer(ephemeral=True)
+
         try:
             matches = await Database.fetch(
                 'SELECT "Id", COALESCE("Discord", \'\') AS discord_value FROM "User" WHERE LOWER(COALESCE("Email", \'\')) = $1',
@@ -198,21 +203,21 @@ class StaffNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Failed email lookup for link command user_id=%s", getattr(interaction.user, "id", None))
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Account lookup failed: {exc.__class__.__name__}",
                 ephemeral=True,
             )
             return
 
         if not matches:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "No matching account could be verified for that email.",
                 ephemeral=True,
             )
             return
 
         if len(matches) > 1:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Multiple accounts matched that email. Please contact an admin.",
                 ephemeral=True,
             )
@@ -225,13 +230,13 @@ class StaffNinjaGroup(app_commands.Group):
         if existing_discord:
             normalized_existing = existing_discord.lstrip("@").lower()
             if normalized_existing == requestor_id.lower():
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Your Discord account is already linked.",
                     ephemeral=True,
                 )
                 return
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "This account is already linked to a Discord identity. Please contact an admin to re-link.",
                 ephemeral=True,
             )
@@ -241,10 +246,12 @@ class StaffNinjaGroup(app_commands.Group):
         expires_at = datetime.now(timezone.utc).timestamp() + (settings.LINK_CODE_TTL_MINUTES * 60)
 
         try:
-            self._send_verification_email(normalized_email, code)
+            # Run blocking SMTP call in a thread so it doesn't stall the event loop
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._send_verification_email, normalized_email, code)
         except Exception as exc:
             logging.exception("Failed to send link verification email user_id=%s", getattr(interaction.user, "id", None))
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Could not send verification email: {exc.__class__.__name__}",
                 ephemeral=True,
             )
@@ -258,7 +265,7 @@ class StaffNinjaGroup(app_commands.Group):
             "attempts": 0,
         }
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Verification code sent. Run `/staffninja verify code:<123456>` to complete linking.",
             ephemeral=True,
         )
@@ -419,6 +426,10 @@ class StaffNinjaGroup(app_commands.Group):
 
 
 class EventNinjaGroup(app_commands.Group):
+    POLICY_URL_PREFIX = "https://staff.animenebraskon.com/staff/policy/"
+    POLICY_DEEP_ANALYZE_LIMIT = 40
+    POLICY_CONTEXT_LIMIT = 16
+
     def __init__(self):
         super().__init__(name="eventninja", description="Event policy commands")
 
@@ -446,11 +457,70 @@ class EventNinjaGroup(app_commands.Group):
         return compact[start:end]
 
     @staticmethod
-    def _build_policy_search_query(question: str) -> str:
+    def _extract_relevant_sections(text: str, terms: list[str], section_size: int = 420, max_sections: int = 2) -> str:
+        if not text:
+            return ""
+
+        compact = str(text).replace("\r", "")
+        lowered = compact.lower()
+
+        positions: list[int] = []
+        for term in terms:
+            t = (term or "").strip().lower()
+            if not t:
+                continue
+            idx = lowered.find(t)
+            if idx >= 0:
+                positions.append(idx)
+
+        if not positions:
+            return compact[:section_size]
+
+        positions.sort()
+        chosen: list[int] = []
+        for pos in positions:
+            if not chosen or abs(pos - chosen[-1]) > (section_size // 2):
+                chosen.append(pos)
+            if len(chosen) >= max_sections:
+                break
+
+        snippets: list[str] = []
+        for pos in chosen:
+            start = max(0, pos - (section_size // 3))
+            end = min(len(compact), start + section_size)
+            snippets.append(compact[start:end].strip())
+
+        return "\n...\n".join(s for s in snippets if s)
+
+    @staticmethod
+    def _extract_query_terms(question: str) -> list[str]:
         cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (question or "").lower())
-        tokens = [t for t in cleaned.split() if len(t) >= 4]
+        raw_tokens = [t.strip() for t in cleaned.split() if t.strip()]
+
+        # Keep short all-letter acronyms (e.g., "av", "hr") while filtering noisy tiny tokens.
+        tokens: list[str] = []
+        for token in raw_tokens:
+            if len(token) >= 3:
+                tokens.append(token)
+            elif len(token) == 2 and token.isalpha():
+                tokens.append(token)
+
+        seen = set()
+        ordered: list[str] = []
+        for token in tokens:
+            if token not in seen:
+                seen.add(token)
+                ordered.append(token)
+        return ordered
+
+    @staticmethod
+    def _build_policy_search_query(question: str) -> str:
+        tokens = EventNinjaGroup._extract_query_terms(question)
 
         expanded_terms = set(tokens)
+        if any(t in expanded_terms for t in {"av", "audio", "visual", "sound", "video", "tech"}):
+            expanded_terms.update({"av", "audio", "visual", "sound", "video", "tech", "production", "equipment"})
+
         if any(t in expanded_terms for t in {"drunk", "drink", "drinking", "alcohol", "intoxicated", "intoxication"}):
             expanded_terms.update({"alcohol", "intoxicated", "intoxication", "sobriety", "conduct", "behavior", "safety"})
 
@@ -460,11 +530,29 @@ class EventNinjaGroup(app_commands.Group):
         ordered = sorted(expanded_terms)
         return " ".join(ordered) if ordered else question
 
+    @classmethod
+    def _linkify_policy_lines(cls, answer: str) -> str:
+        pattern = re.compile(r"^- Doc\s+(\d+)\s+\|\s*([^|]+?)\s*\|\s*relevance:\s*(.*)$", re.MULTILINE)
+
+        def _replace(match: re.Match[str]) -> str:
+            doc_id = match.group(1)
+            title = match.group(2).strip()
+            relevance = match.group(3).strip()
+
+            if title.startswith("[") and "](" in title:
+                return match.group(0)
+
+            policy_url = f"{cls.POLICY_URL_PREFIX}{doc_id}"
+            return f"- Doc {doc_id} | [{title}]({policy_url}) | relevance: {relevance}"
+
+        return pattern.sub(_replace, answer)
+
     @app_commands.command(name="policy", description="Answer policy questions from Document table content")
     @app_commands.describe(question="Policy question to answer from documents")
     async def policy(self, interaction: discord.Interaction, question: str):
         clean_question = (question or "").strip()
         search_query = self._build_policy_search_query(clean_question)
+        question_terms = self._extract_query_terms(clean_question)
         user_id = getattr(interaction.user, "id", None)
         guild_id = interaction.guild_id
         channel_id = interaction.channel_id
@@ -513,36 +601,51 @@ class EventNinjaGroup(app_commands.Group):
 
         used_fallback = False
         like_terms: list[str] = []
+        query_candidates = [q for q in [clean_question, search_query] if q and q.strip()]
+        deduped_queries: list[str] = []
+        seen_queries = set()
+        for q in query_candidates:
+            normalized = q.strip().lower()
+            if normalized not in seen_queries:
+                seen_queries.add(normalized)
+                deduped_queries.append(q)
+
+        docs_by_id: dict[int, dict] = {}
         try:
-            docs = await Database.fetch(
-                """
-                SELECT
-                    "Id",
-                    COALESCE("Title", '') AS title,
-                    COALESCE("Category", '') AS category,
-                    COALESCE("Version", '') AS version,
-                    COALESCE("DocumentValue", '') AS document_value,
-                    ts_rank_cd(
-                        to_tsvector(
-                            'english',
-                            COALESCE("Title", '') || ' ' || COALESCE("Category", '') || ' ' || COALESCE("DocumentValue", '')
-                        ),
-                        plainto_tsquery('english', $1)
-                    ) AS rank
-                FROM "Document"
-                WHERE to_tsvector(
-                        'english',
-                        COALESCE("Title", '') || ' ' || COALESCE("Category", '') || ' ' || COALESCE("DocumentValue", '')
-                    ) @@ plainto_tsquery('english', $1)
-                ORDER BY rank DESC, "EditedDate" DESC NULLS LAST
-                LIMIT 20
-                """,
-                search_query,
-            )
+            for search_candidate in deduped_queries:
+                candidate_docs = await Database.fetch(
+                    """
+                    SELECT
+                        "Id",
+                        COALESCE("Title", '') AS title,
+                        COALESCE("Category", '') AS category,
+                        COALESCE("Version", '') AS version,
+                        ts_rank_cd(
+                            to_tsvector(
+                                'english',
+                                COALESCE("Title", '') || ' ' || COALESCE("Category", '') || ' ' || COALESCE("DocumentValue", '')
+                            ),
+                            plainto_tsquery('english', $1)
+                        ) AS rank
+                    FROM "Document"
+                    ORDER BY rank DESC, "EditedDate" DESC NULLS LAST
+                    """,
+                    search_candidate,
+                )
+
+                for row in candidate_docs:
+                    doc_id = int(row["Id"])
+                    rank = float(row["rank"] or 0.0)
+                    current = docs_by_id.get(doc_id)
+                    if not current or rank > float(current.get("rank") or 0.0):
+                        docs_by_id[doc_id] = row
+
+            docs = list(docs_by_id.values())
             logging.debug(
-                "Policy full-text lookup completed: user_id=%s doc_count=%s",
+                "Policy full-text lookup completed: user_id=%s doc_count=%s query_count=%s",
                 user_id,
                 len(docs),
+                len(deduped_queries),
             )
         except Exception as exc:
             logging.exception("Policy document lookup failed")
@@ -554,7 +657,8 @@ class EventNinjaGroup(app_commands.Group):
 
         if not docs:
             # Fallback for natural-language phrasing that may miss full-text search tokenization.
-            tokens = [t for t in search_query.replace("\n", " ").split(" ") if len(t.strip()) >= 4][:12]
+            fallback_terms = question_terms + [t for t in self._extract_query_terms(search_query) if t not in question_terms]
+            tokens = [t for t in fallback_terms if len(t.strip()) >= 2][:16]
             like_terms = [f"%{t.strip()}%" for t in tokens if t.strip()]
             if like_terms:
                 used_fallback = True
@@ -566,14 +670,12 @@ class EventNinjaGroup(app_commands.Group):
                             COALESCE("Title", '') AS title,
                             COALESCE("Category", '') AS category,
                             COALESCE("Version", '') AS version,
-                            COALESCE("DocumentValue", '') AS document_value,
                             0.0::float AS rank
                         FROM "Document"
                         WHERE COALESCE("Title", '') ILIKE ANY($1::text[])
                            OR COALESCE("Category", '') ILIKE ANY($1::text[])
                            OR COALESCE("DocumentValue", '') ILIKE ANY($1::text[])
                         ORDER BY "EditedDate" DESC NULLS LAST
-                        LIMIT 20
                         """,
                         like_terms,
                     )
@@ -605,7 +707,86 @@ class EventNinjaGroup(app_commands.Group):
             )
             return
 
-        search_terms = [t.strip().lower() for t in search_query.split(" ") if t.strip()]
+        score_terms = question_terms or self._extract_query_terms(search_query)
+
+        def _rank_metadata(row: dict) -> tuple[float, float]:
+            title = (row.get("title") or "").lower()
+            category = (row.get("category") or "").lower()
+            base_rank = float(row.get("rank") or 0.0)
+
+            title_hits = sum(1 for t in score_terms if t in title)
+            category_hits = sum(1 for t in score_terms if t in category)
+            score = (base_rank * 20.0) + (title_hits * 5.0) + (category_hits * 3.0)
+            return score, base_rank
+
+        ranked_docs = sorted(docs, key=_rank_metadata, reverse=True)
+        policy_scan_count = len(ranked_docs)
+        deep_candidates = ranked_docs[: self.POLICY_DEEP_ANALYZE_LIMIT]
+        deep_ids = [int(r["Id"]) for r in deep_candidates]
+
+        docs_with_text: list[dict] = []
+        if deep_ids:
+            try:
+                detailed_rows = await Database.fetch(
+                    """
+                    SELECT
+                        "Id",
+                        COALESCE("DocumentValue", '') AS document_value
+                    FROM "Document"
+                    WHERE "Id" = ANY($1::int[])
+                    ORDER BY array_position($1::int[], "Id")
+                    """,
+                    deep_ids,
+                )
+                detailed_by_id = {int(r["Id"]): r for r in detailed_rows}
+
+                for meta in deep_candidates:
+                    doc_id = int(meta["Id"])
+                    detailed = detailed_by_id.get(doc_id)
+                    if not detailed:
+                        continue
+
+                    merged = dict(meta)
+                    merged["document_value"] = detailed.get("document_value") or ""
+                    docs_with_text.append(merged)
+            except Exception as exc:
+                logging.exception("Policy deep document lookup failed")
+                await interaction.response.send_message(
+                    f"Document lookup failed: {exc.__class__.__name__}",
+                    ephemeral=True,
+                )
+                return
+
+        if not docs_with_text:
+            logging.info(
+                "Policy question had no deep candidates: user_id=%s search_query=%s used_fallback=%s like_terms=%s",
+                user_id,
+                search_query,
+                used_fallback,
+                like_terms,
+            )
+            await interaction.response.send_message(
+                "I can only answer from the Document table and found no matching policy text.",
+                ephemeral=True,
+            )
+            return
+
+        def _rank_row(row: dict) -> tuple[float, float]:
+            title = (row.get("title") or "").lower()
+            category = (row.get("category") or "").lower()
+            text = str(row.get("document_value") or "").lower()
+            base_rank = float(row.get("rank") or 0.0)
+
+            overlap_count = sum(1 for t in score_terms if t in text)
+            title_hits = sum(1 for t in score_terms if t in title)
+            category_hits = sum(1 for t in score_terms if t in category)
+
+            score = (base_rank * 10.0) + (overlap_count * 2.0) + (title_hits * 3.0) + (category_hits * 2.0)
+            return score, base_rank
+
+        docs = sorted(docs_with_text, key=_rank_row, reverse=True)[: self.POLICY_CONTEXT_LIMIT]
+
+        search_terms = score_terms
         context_chunks = []
         sources = []
         allowed_doc_ids = []
@@ -616,8 +797,8 @@ class EventNinjaGroup(app_commands.Group):
             category = row["category"] or "(uncategorized)"
             version = row["version"] or "(none)"
             excerpt = self._truncate(
-                self._extract_relevant_section(str(row["document_value"]), search_terms, section_size=700),
-                700,
+                self._extract_relevant_sections(str(row["document_value"]), search_terms, section_size=420, max_sections=2),
+                900,
             )
             context_chunks.append(
                 f"[Document Id: {doc_id}] Title: {title}\nCategory: {category}\nVersion: {version}\nRelevant section:\n{excerpt}"
@@ -631,14 +812,17 @@ class EventNinjaGroup(app_commands.Group):
                     "category": category,
                     "version": version,
                     "rank": float(row["rank"]) if row["rank"] is not None else None,
+                    "score_terms": score_terms,
                     "document_len": len(str(row["document_value"])),
                     "chunk_len": len(excerpt),
                 }
             )
 
         logging.debug(
-            "Policy context prepared: user_id=%s doc_count=%s used_fallback=%s docs=%s",
+            "Policy context prepared: user_id=%s scanned=%s deep_candidates=%s context_docs=%s used_fallback=%s docs=%s",
             user_id,
+            policy_scan_count,
+            len(deep_candidates),
             len(docs),
             used_fallback,
             doc_debug_rows,
@@ -649,14 +833,17 @@ class EventNinjaGroup(app_commands.Group):
             "Do not use prior knowledge, web data, or any source not included below. "
             "Do NOT answer hypothetical scenarios directly (for example, do not state what punishment would happen). "
             "Do NOT infer outcomes, discipline, or consequences that are not explicitly written in the excerpts. "
-            "Instead, identify the most relevant policies and explain why each is relevant to the user's question.\n\n"
+            "Instead, identify the most relevant policies and explain why each is relevant to the user's question. "
+            "Prefer policies with explicit language that directly matches the question's intent or terms.\n\n"
             "Response format rules:\n"
             "1) Start with: Relevant policies\n"
             "2) Return 1-4 bullet lines in this exact style: - Doc <id> | <title> | relevance: <short reason>\n"
-            "3) If no excerpt directly addresses the question, include: - No direct policy match found in provided excerpts.\n"
-            "4) Optionally add one final line starting with: Clarify: <question> if the policy text is ambiguous\n"
-            "5) If excerpts are insufficient, reply exactly: I can only answer from the Document table and the provided excerpts are insufficient.\n\n"
+            "3) Each reason must reference concrete wording from the excerpt (not generic guesses).\n"
+            "4) If no excerpt directly addresses the question, include: - No direct policy match found in provided excerpts.\n"
+            "5) Optionally add one final line starting with: Clarify: <question> if the policy text is ambiguous\n"
+            "6) If excerpts are insufficient, reply exactly: I can only answer from the Document table and the provided excerpts are insufficient.\n\n"
             f"Only use document IDs from this allowed list when citing: {', '.join(allowed_doc_ids)}\n\n"
+            f"Question key terms: {', '.join(score_terms) if score_terms else '(none)'}\n\n"
             f"User question:\n{clean_question}\n\n"
             "Document excerpts:\n"
             + "\n\n---\n\n".join(context_chunks)
@@ -690,12 +877,14 @@ class EventNinjaGroup(app_commands.Group):
             return
 
         final_answer = self._truncate((answer or "").strip() or "(no response)", 1600)
+        final_answer = self._linkify_policy_lines(final_answer)
         source_line = self._truncate(", ".join(sources), 500)
         safe_question = self._truncate(clean_question, 300)
         template_header = "eventNinja policy matches"
         template_question = f"- question: {safe_question}"
-        template_sources = f"- source documents scanned: {source_line}"
-        fixed_size = len(template_header) + len(template_question) + len(template_sources) + len("- relevant policies:\n") + 12
+        template_scan = f"- policy scan: scanned {policy_scan_count} total, analyzed {len(deep_candidates)} deeply, cited from {len(docs)}"
+        template_sources = f"- source documents: {source_line}"
+        fixed_size = len(template_header) + len(template_question) + len(template_scan) + len(template_sources) + len("- relevant policies:\n") + 12
         max_answer_len = max(200, 1900 - fixed_size)
         safe_answer = self._truncate(final_answer, max_answer_len)
 
@@ -703,6 +892,7 @@ class EventNinjaGroup(app_commands.Group):
             template_header,
             template_question,
             f"- relevant policies:\n{safe_answer}",
+            template_scan,
             template_sources,
         ]
         combined = "\n".join(lines)
@@ -713,6 +903,7 @@ class EventNinjaGroup(app_commands.Group):
                 template_header,
                 template_question,
                 f"- relevant policies:\n{safe_answer}",
+                template_scan,
                 template_sources,
             ]
 
