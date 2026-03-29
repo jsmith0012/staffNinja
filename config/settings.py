@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     AI_ENDPOINT: str = "http://localhost:8000/v1"
     LOG_LEVEL: str = "INFO"
     COMMAND_RESYNC_MINUTES: int = 30
+    CHAT_MONITOR_CHANNELS: str = ""
+    CHAT_MONITOR_DOC_CATEGORIES: str = ""
+    CHAT_MONITOR_COOLDOWN_SECONDS: int = 30
 
 def get_settings() -> Settings:
     return Settings()

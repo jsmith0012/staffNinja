@@ -14,6 +14,12 @@ from discord.ext import commands
 from ai.provider import get_provider
 from config.settings import get_settings
 from db.connection import Database
+from services.document_search_service import (
+    extract_query_terms as _svc_extract_query_terms,
+    build_search_query as _svc_build_search_query,
+    extract_relevant_sections as _svc_extract_relevant_sections,
+    search_documents as _svc_search_documents,
+)
 
 settings = get_settings()
 
@@ -522,77 +528,15 @@ class EventNinjaGroup(app_commands.Group):
 
     @staticmethod
     def _extract_relevant_sections(text: str, terms: list[str], section_size: int = 420, max_sections: int = 2) -> str:
-        if not text:
-            return ""
-
-        compact = str(text).replace("\r", "")
-        lowered = compact.lower()
-
-        positions: list[int] = []
-        for term in terms:
-            t = (term or "").strip().lower()
-            if not t:
-                continue
-            idx = lowered.find(t)
-            if idx >= 0:
-                positions.append(idx)
-
-        if not positions:
-            return compact[:section_size]
-
-        positions.sort()
-        chosen: list[int] = []
-        for pos in positions:
-            if not chosen or abs(pos - chosen[-1]) > (section_size // 2):
-                chosen.append(pos)
-            if len(chosen) >= max_sections:
-                break
-
-        snippets: list[str] = []
-        for pos in chosen:
-            start = max(0, pos - (section_size // 3))
-            end = min(len(compact), start + section_size)
-            snippets.append(compact[start:end].strip())
-
-        return "\n...\n".join(s for s in snippets if s)
+        return _svc_extract_relevant_sections(text, terms, section_size=section_size, max_sections=max_sections)
 
     @staticmethod
     def _extract_query_terms(question: str) -> list[str]:
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (question or "").lower())
-        raw_tokens = [t.strip() for t in cleaned.split() if t.strip()]
-
-        # Keep short all-letter acronyms (e.g., "av", "hr") while filtering noisy tiny tokens.
-        tokens: list[str] = []
-        for token in raw_tokens:
-            if len(token) >= 3:
-                tokens.append(token)
-            elif len(token) == 2 and token.isalpha():
-                tokens.append(token)
-
-        seen = set()
-        ordered: list[str] = []
-        for token in tokens:
-            if token not in seen:
-                seen.add(token)
-                ordered.append(token)
-        return ordered
+        return _svc_extract_query_terms(question)
 
     @staticmethod
     def _build_policy_search_query(question: str) -> str:
-        tokens = EventNinjaGroup._extract_query_terms(question)
-
-        expanded_terms = set(tokens)
-        if any(t in expanded_terms for t in {"av", "audio", "visual", "sound", "video", "tech"}):
-            expanded_terms.update({"av", "audio", "visual", "sound", "video", "tech", "production", "equipment"})
-
-        if any(t in expanded_terms for t in {"drunk", "drink", "drinking", "alcohol", "intoxicated", "intoxication"}):
-            expanded_terms.update({"alcohol", "intoxicated", "intoxication", "sobriety", "conduct", "behavior", "safety"})
-
-        if any(t in expanded_terms for t in {"harass", "harassment", "hostile"}):
-            expanded_terms.update({"harassment", "conduct", "behavior", "safety"})
-
-        ordered = sorted(expanded_terms)
-        return " ".join(ordered) if ordered else question
+        return _svc_build_search_query(question)
 
     @classmethod
     def _linkify_policy_lines(cls, answer: str) -> str:

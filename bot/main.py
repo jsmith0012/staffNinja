@@ -260,7 +260,7 @@ async def ensure_staff_stats_channels():
 
 # Load cogs dynamically
 async def load_cogs():
-    for cog in ["staff_status", "reminders", "org_tools", "staffninja"]:
+    for cog in ["staff_status", "reminders", "org_tools", "staffninja", "chat_monitor"]:
         try:
             await bot.load_extension(f"bot.cogs.{cog}")
         except Exception as e:
