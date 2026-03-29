@@ -36,6 +36,18 @@ class StaffNinjaGroup(app_commands.Group):
             return str(value)
 
     @staticmethod
+    def _format_db_timestamp(value):
+        if value is None:
+            return "(none)"
+
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        return str(value)
+
+    @staticmethod
     def _send_verification_email(recipient_email: str, code: str):
         if not settings.EMAIL_SMTP_USERNAME or not settings.EMAIL_SMTP_PASSWORD or not settings.EMAIL_FROM:
             raise RuntimeError("Email delivery is not configured")
@@ -408,6 +420,57 @@ class StaffNinjaGroup(app_commands.Group):
         allergies = row["allergies"] or "(none)"
         year_joined = str(row["year_joined"]) if row["year_joined"] is not None else "(none)"
 
+        try:
+            agreement_rows = await Database.fetch(
+                """
+                SELECT
+                    e."Id" AS event_id,
+                    COALESCE(e."Name", '') AS event_name,
+                    e."StaffAgreementFormId" AS staff_agreement_form_id,
+                    COALESCE(f."Title", '') AS staff_agreement_form_title,
+                    cf."Id" AS completed_form_id,
+                    COALESCE(cf."EditedDate", cf."CreatedDate") AS completed_at
+                FROM "Event" e
+                LEFT JOIN "Form" f ON f."Id" = e."StaffAgreementFormId"
+                LEFT JOIN LATERAL (
+                    SELECT "Id", "EditedDate", "CreatedDate"
+                    FROM "CompletedForm"
+                    WHERE "FormId" = e."StaffAgreementFormId"
+                      AND "UserId" = $1
+                    ORDER BY COALESCE("EditedDate", "CreatedDate") DESC NULLS LAST, "Id" DESC
+                    LIMIT 1
+                ) cf ON TRUE
+                WHERE e."Status" = 1
+                ORDER BY e."Id" DESC
+                LIMIT 1
+                """,
+                row["user_id"],
+            )
+        except Exception as exc:
+            logging.exception("Failed staff agreement lookup for user_id=%s", row["user_id"])
+            await interaction.response.send_message(
+                f"Staff agreement lookup failed: {exc.__class__.__name__}",
+                ephemeral=True,
+            )
+            return
+
+        if not agreement_rows:
+            staff_agreement_status = "no active event found"
+        else:
+            agreement = agreement_rows[0]
+            event_name = agreement["event_name"] or f"event {agreement['event_id']}"
+            form_id = agreement["staff_agreement_form_id"]
+            form_title = agreement["staff_agreement_form_title"] or "staff agreement"
+            completed_form_id = agreement["completed_form_id"]
+
+            if not form_id:
+                staff_agreement_status = f"not configured for {event_name}"
+            elif completed_form_id:
+                completed_at = self._format_db_timestamp(agreement["completed_at"])
+                staff_agreement_status = f"agreed for {event_name} ({form_title}) on {completed_at}"
+            else:
+                staff_agreement_status = f"not yet agreed for {event_name} ({form_title})"
+
         lines = [
             "staffNinja staff profile",
             f"- user id: {row['user_id']}",
@@ -421,6 +484,7 @@ class StaffNinjaGroup(app_commands.Group):
             f"- birth day: {birth_date}",
             f"- alergys: {allergies}",
             f"- year joined: {year_joined}",
+            f"- staff agreement: {staff_agreement_status}",
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
