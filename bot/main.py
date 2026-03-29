@@ -185,16 +185,27 @@ async def _get_staff_stats_counts() -> tuple[int, int]:
     return active_staff, agreements
 
 
+def _discord_normalize(name: str) -> str:
+    """Approximate Discord's channel name normalization (lowercase, non-alphanum/hyphen → hyphen, collapse runs)."""
+    import re
+    lowered = name.lower()
+    cleaned = re.sub(r"[^a-z0-9-]", "-", lowered)  # spaces, colons, etc. → hyphen
+    collapsed = re.sub(r"-{2,}", "-", cleaned)      # collapse consecutive hyphens
+    return collapsed.strip("-")
+
+
 def _find_text_channel_by_prefix(category: discord.CategoryChannel, prefix: str) -> discord.TextChannel | None:
+    norm_prefix = _discord_normalize(prefix)
     for channel in category.channels:
-        if isinstance(channel, discord.TextChannel) and channel.name.startswith(prefix):
+        if isinstance(channel, discord.TextChannel) and channel.name.startswith(norm_prefix):
             return channel
     return None
 
 
 def _find_voice_channel_by_prefix(category: discord.CategoryChannel, prefix: str) -> discord.VoiceChannel | None:
+    norm_prefix = _discord_normalize(prefix)
     for channel in category.channels:
-        if isinstance(channel, discord.VoiceChannel) and channel.name.startswith(prefix):
+        if isinstance(channel, discord.VoiceChannel) and channel.name.startswith(norm_prefix):
             return channel
     return None
 
@@ -206,6 +217,7 @@ async def _ensure_or_update_stat_text_channel(
     value: int,
 ) -> None:
     desired_name = f"{prefix}{value}"
+    desired_normalized = _discord_normalize(desired_name)
 
     # Migrate legacy voice stat channels to text channels.
     legacy_voice = _find_voice_channel_by_prefix(category, prefix)
@@ -214,11 +226,28 @@ async def _ensure_or_update_stat_text_channel(
 
     channel = _find_text_channel_by_prefix(category, prefix)
     if channel is None:
-        await guild.create_text_channel(desired_name, category=category, reason="staffNinja stats channel")
+        await guild.create_text_channel(desired_normalized, category=category, reason="staffNinja stats channel")
         return
 
-    if channel.name != desired_name:
-        await channel.edit(name=desired_name, reason="staffNinja stats update")
+    # Channel names are already stored normalized by Discord; compare normalized forms.
+    if channel.name != desired_normalized:
+        await channel.edit(name=desired_normalized, reason="staffNinja stats update")
+
+
+async def _purge_duplicate_stat_channels(category: discord.CategoryChannel, prefix: str) -> None:
+    """Delete all text channels in *category* matching *prefix* except the first one found."""
+    norm_prefix = _discord_normalize(prefix)
+    matches = [
+        ch for ch in category.channels
+        if isinstance(ch, discord.TextChannel) and ch.name.startswith(norm_prefix)
+    ]
+    # Keep the first (lowest position), delete the rest.
+    for ch in matches[1:]:
+        try:
+            await ch.delete(reason="staffNinja: removing duplicate stats channel")
+            logging.info("Deleted duplicate stats channel #%s", ch.name)
+        except Exception:
+            logging.exception("Failed to delete duplicate stats channel #%s", ch.name)
 
 
 async def ensure_staff_stats_channels():
@@ -245,6 +274,10 @@ async def ensure_staff_stats_channels():
         except Exception as exc:
             logging.exception("Failed to create Staff Stats category: %s", exc)
             return
+
+    # Clean up any duplicates left over from the previous naming bug.
+    await _purge_duplicate_stat_channels(category, ACTIVE_STAFF_CHANNEL_PREFIX)
+    await _purge_duplicate_stat_channels(category, STAFF_AGREEMENTS_CHANNEL_PREFIX)
 
     try:
         await _ensure_or_update_stat_text_channel(guild, category, ACTIVE_STAFF_CHANNEL_PREFIX, active_staff)
