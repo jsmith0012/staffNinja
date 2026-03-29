@@ -3,6 +3,7 @@ import logging
 import discord
 from discord.ext import commands
 from config.settings import get_settings
+from db.connection import Database
 from utils.logging import setup_logging
 
 # Load config and setup logging
@@ -14,6 +15,9 @@ DEBUG_LOG_ENABLED = str(getattr(settings, "LOG_LEVEL", "INFO")).upper() == "DEBU
 DEBUG_LOG_CHANNEL_NAME = "debug_log"
 DEBUG_LOG_MESSAGE_LIMIT = 1800
 DEBUG_LOG_QUEUE_MAXSIZE = 1000
+STAFF_STATS_CATEGORY_NAME = "Staff Stats"
+ACTIVE_STAFF_CHANNEL_PREFIX = "Active Staff: "
+STAFF_AGREEMENTS_CHANNEL_PREFIX = "Staff Agreements: "
 
 intents = discord.Intents.default()
 intents.members = settings.DISCORD_INTENTS_MEMBERS
@@ -147,6 +151,113 @@ async def ensure_debug_log_forwarding():
     debug_log_task = asyncio.create_task(debug_log_forwarder_loop(channel))
     logging.info("Started debug log forwarding to Discord channel #%s", DEBUG_LOG_CHANNEL_NAME)
 
+
+async def _get_staff_stats_counts() -> tuple[int, int]:
+    active_rows = await Database.fetch(
+        'SELECT COUNT(*) AS total FROM "User" WHERE COALESCE("Status", 0) = 1'
+    )
+    active_staff = int(active_rows[0]["total"]) if active_rows else 0
+
+    event_rows = await Database.fetch(
+        'SELECT "StaffAgreementFormId" FROM "Event" WHERE "Status" = 1 ORDER BY "Id" DESC LIMIT 1'
+    )
+    if not event_rows:
+        return active_staff, 0
+
+    form_id = event_rows[0]["StaffAgreementFormId"]
+    if not form_id:
+        return active_staff, 0
+
+    agreed_rows = await Database.fetch(
+        '''
+        SELECT COUNT(DISTINCT cf."UserId") AS total
+        FROM "CompletedForm" cf
+        WHERE cf."FormId" = $1
+          AND EXISTS (
+              SELECT 1
+              FROM "CompletedAnswer" ca
+              WHERE ca."CompletedFormId" = cf."Id"
+          )
+        ''',
+        int(form_id),
+    )
+    agreements = int(agreed_rows[0]["total"]) if agreed_rows else 0
+    return active_staff, agreements
+
+
+def _find_text_channel_by_prefix(category: discord.CategoryChannel, prefix: str) -> discord.TextChannel | None:
+    for channel in category.channels:
+        if isinstance(channel, discord.TextChannel) and channel.name.startswith(prefix):
+            return channel
+    return None
+
+
+def _find_voice_channel_by_prefix(category: discord.CategoryChannel, prefix: str) -> discord.VoiceChannel | None:
+    for channel in category.channels:
+        if isinstance(channel, discord.VoiceChannel) and channel.name.startswith(prefix):
+            return channel
+    return None
+
+
+async def _ensure_or_update_stat_text_channel(
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
+    prefix: str,
+    value: int,
+) -> None:
+    desired_name = f"{prefix}{value}"
+
+    # Migrate legacy voice stat channels to text channels.
+    legacy_voice = _find_voice_channel_by_prefix(category, prefix)
+    if legacy_voice is not None:
+        await legacy_voice.delete(reason="staffNinja stats channel migrated to text channel")
+
+    channel = _find_text_channel_by_prefix(category, prefix)
+    if channel is None:
+        await guild.create_text_channel(desired_name, category=category, reason="staffNinja stats channel")
+        return
+
+    if channel.name != desired_name:
+        await channel.edit(name=desired_name, reason="staffNinja stats update")
+
+
+async def ensure_staff_stats_channels():
+    guild = bot.get_guild(ALLOWED_GUILD_ID)
+    if guild is None:
+        return
+
+    me = guild.me
+    if not me or not me.guild_permissions.manage_channels:
+        logging.warning("Missing Manage Channels permission; cannot maintain Staff Stats channels")
+        return
+
+    try:
+        active_staff, agreements = await _get_staff_stats_counts()
+    except Exception as exc:
+        logging.exception("Failed to compute staff stats counters: %s", exc)
+        return
+
+    category = discord.utils.get(guild.categories, name=STAFF_STATS_CATEGORY_NAME)
+    if not isinstance(category, discord.CategoryChannel):
+        try:
+            category = await guild.create_category(STAFF_STATS_CATEGORY_NAME, reason="staffNinja stats category")
+            logging.info("Created Staff Stats category in guild_id=%s", ALLOWED_GUILD_ID)
+        except Exception as exc:
+            logging.exception("Failed to create Staff Stats category: %s", exc)
+            return
+
+    try:
+        await _ensure_or_update_stat_text_channel(guild, category, ACTIVE_STAFF_CHANNEL_PREFIX, active_staff)
+        await _ensure_or_update_stat_text_channel(guild, category, STAFF_AGREEMENTS_CHANNEL_PREFIX, agreements)
+        logging.debug(
+            "Updated Staff Stats channels: active_staff=%s agreements=%s guild_id=%s",
+            active_staff,
+            agreements,
+            ALLOWED_GUILD_ID,
+        )
+    except Exception as exc:
+        logging.exception("Failed updating Staff Stats channels: %s", exc)
+
 # Load cogs dynamically
 async def load_cogs():
     for cog in ["staff_status", "reminders", "org_tools", "staffninja"]:
@@ -182,6 +293,7 @@ async def periodic_command_resync_loop():
     while not bot.is_closed():
         await asyncio.sleep(COMMAND_RESYNC_MINUTES * 60)
         await ensure_debug_log_forwarding()
+        await ensure_staff_stats_channels()
         await sync_app_commands("periodic")
 
 @bot.event
@@ -193,6 +305,7 @@ async def on_ready():
 
     await sync_app_commands("on_ready")
     await ensure_debug_log_forwarding()
+    await ensure_staff_stats_channels()
 
     if periodic_resync_task is None or periodic_resync_task.done():
         periodic_resync_task = asyncio.create_task(periodic_command_resync_loop())
@@ -205,6 +318,7 @@ async def on_ready():
 async def on_resumed():
     logging.warning("Gateway resumed; triggering command resync")
     await ensure_debug_log_forwarding()
+    await ensure_staff_stats_channels()
     await sync_app_commands("on_resumed")
 
 
