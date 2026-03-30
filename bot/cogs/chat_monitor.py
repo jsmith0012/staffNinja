@@ -41,6 +41,22 @@ _POLICY_URL_PREFIX = "https://staff.animenebraskon.com/staff/policy/"
 _EMBED_COLOR = discord.Color.blurple()
 _MAX_EMBED_FIELD = 1024
 _MAX_ANSWER_LEN = 900
+_DEFAULT_MAX_QUESTION_CHARS = 600
+
+_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.IGNORECASE),
+    re.compile(r"developer\s+mode", re.IGNORECASE),
+    re.compile(r"reveal\s+.*(system|prompt)", re.IGNORECASE),
+    re.compile(r"system\s+override", re.IGNORECASE),
+    re.compile(r"bypass\s+(safety|guardrails?)", re.IGNORECASE),
+    re.compile(r"repeat\s+the\s+text\s+above", re.IGNORECASE),
+)
+
+_SUSPICIOUS_OUTPUT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"you\s+are\s+a\s+helpful\s+assistant", re.IGNORECASE),
+    re.compile(r"system\s*prompt", re.IGNORECASE),
+    re.compile(r"api[_\s-]?key", re.IGNORECASE),
+)
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -72,21 +88,57 @@ def _parse_csv(value: str) -> list[str]:
     return [v.strip() for v in (value or "").split(",") if v.strip()]
 
 
+def _looks_like_prompt_injection(text: str) -> bool:
+    sample = (text or "").strip()
+    if not sample:
+        return False
+    return any(pattern.search(sample) for pattern in _INJECTION_PATTERNS)
+
+
+def _sanitize_answer_text(text: str) -> str:
+    """Reduce mention abuse and obvious markdown/html payload tricks in model output."""
+    cleaned = (text or "").replace("\r", "")
+    cleaned = cleaned.replace("@everyone", "@\u200beveryone")
+    cleaned = cleaned.replace("@here", "@\u200bhere")
+    cleaned = re.sub(r"<@&\d+>", "[role mention removed]", cleaned)
+    cleaned = re.sub(r"<script.*?>.*?</script>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()
+
+
+def _output_looks_sensitive(text: str) -> bool:
+    sample = (text or "").strip()
+    if not sample:
+        return False
+    return any(pattern.search(sample) for pattern in _SUSPICIOUS_OUTPUT_PATTERNS)
+
+
 class ChatMonitorCog(commands.Cog):
     """Listens for messages with '?' in monitored channels and answers from docs."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._enabled = bool(getattr(settings, "CHAT_MONITOR_ENABLED", True))
         self._monitored_channel_ids: set[int] = set()
         self._category_filter: list[str] = _parse_csv(
             getattr(settings, "CHAT_MONITOR_DOC_CATEGORIES", "")
         )
         raw_cooldown = int(getattr(settings, "CHAT_MONITOR_COOLDOWN_SECONDS", 30))
         self._cooldown_seconds: int = max(0, raw_cooldown)
+        raw_user_cooldown = int(getattr(settings, "CHAT_MONITOR_USER_COOLDOWN_SECONDS", 20))
+        self._user_cooldown_seconds: int = max(0, raw_user_cooldown)
+        self._max_question_chars = max(
+            120,
+            int(getattr(settings, "CHAT_MONITOR_MAX_QUESTION_CHARS", _DEFAULT_MAX_QUESTION_CHARS)),
+        )
         self._cooldowns: dict[int, float] = {}  # channel_id -> last-reply monotonic time
+        self._user_cooldowns: dict[int, float] = {}  # user_id -> last-reply monotonic time
         self._raw_channels: list[str] = _parse_csv(
             getattr(settings, "CHAT_MONITOR_CHANNELS", "")
         )
+
+        if not self._enabled:
+            logging.info("ChatMonitor: disabled by CHAT_MONITOR_ENABLED=false")
+            return
 
         if not self._raw_channels:
             logging.info("ChatMonitor: CHAT_MONITOR_CHANNELS is empty — feature disabled.")
@@ -110,6 +162,9 @@ class ChatMonitorCog(commands.Cog):
 
     async def _resolve_channels(self) -> None:
         """Map channel names / IDs from settings to actual channel IDs."""
+        if not self._enabled:
+            return
+
         if not self._raw_channels:
             return
 
@@ -153,6 +208,9 @@ class ChatMonitorCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        if not self._enabled:
+            return
+
         # Ignore bots (including ourselves)
         if message.author.bot:
             return
@@ -165,6 +223,27 @@ class ChatMonitorCog(commands.Cog):
         if "?" not in message.content:
             return
 
+        question = (message.content or "").strip()
+        if len(question) > self._max_question_chars:
+            logging.debug(
+                "ChatMonitor: skipped long question (%s chars) from user_id=%s",
+                len(question),
+                getattr(message.author, "id", None),
+            )
+            return
+
+        if _looks_like_prompt_injection(question):
+            logging.warning(
+                "ChatMonitor: blocked potential injection from user_id=%s channel_id=%s",
+                getattr(message.author, "id", None),
+                message.channel.id,
+            )
+            await message.reply(
+                "I can help with convention questions, but I can't process that request format.",
+                mention_author=False,
+            )
+            return
+
         # Per-channel cooldown
         now = time.monotonic()
         last = self._cooldowns.get(message.channel.id, 0.0)
@@ -172,6 +251,16 @@ class ChatMonitorCog(commands.Cog):
             logging.debug(
                 "ChatMonitor: cooldown active in channel %s — skipping.",
                 message.channel.id,
+            )
+            return
+
+        # Per-user cooldown to avoid one user spamming answers across channels.
+        user_id = int(getattr(message.author, "id", 0) or 0)
+        user_last = self._user_cooldowns.get(user_id, 0.0)
+        if now - user_last < self._user_cooldown_seconds:
+            logging.debug(
+                "ChatMonitor: user cooldown active for user_id=%s — skipping.",
+                user_id,
             )
             return
 
@@ -185,6 +274,7 @@ class ChatMonitorCog(commands.Cog):
         # Update cooldown before the async work so concurrent messages don't
         # all slip through while the first is being answered.
         self._cooldowns[message.channel.id] = now
+        self._user_cooldowns[user_id] = now
 
         await self._handle_question(message)
 
@@ -285,6 +375,18 @@ class ChatMonitorCog(commands.Cog):
             return
 
         raw_answer = (answer or "").strip() or "(no response)"
+        raw_answer = _sanitize_answer_text(raw_answer)
+        if _output_looks_sensitive(raw_answer):
+            logging.warning(
+                "ChatMonitor: blocked suspicious model output in channel_id=%s",
+                message.channel.id,
+            )
+            await message.reply(
+                "I couldn't safely answer that from approved sources. Please ask a staff member.",
+                mention_author=False,
+            )
+            return
+
         raw_answer = _linkify_doc_lines(raw_answer)
         safe_answer = _truncate(raw_answer, _MAX_ANSWER_LEN)
         source_line = _truncate(", ".join(sources), 256)
