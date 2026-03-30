@@ -20,6 +20,7 @@ Discord prerequisite:
     DISCORD_INTENTS_MESSAGE_CONTENT setting must be true.
 """
 
+import asyncio
 import logging
 import re
 import time
@@ -129,6 +130,13 @@ class ChatMonitorCog(commands.Cog):
         self._max_question_chars = max(
             120,
             int(getattr(settings, "CHAT_MONITOR_MAX_QUESTION_CHARS", _DEFAULT_MAX_QUESTION_CHARS)),
+        )
+        self._inference_timeout_seconds = max(
+            10,
+            int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)),
+        )
+        self._inference_semaphore = asyncio.Semaphore(
+            max(1, int(getattr(settings, "AI_MAX_CONCURRENT_REQUESTS", 2)))
         )
         self._cooldowns: dict[int, float] = {}  # channel_id -> last-reply monotonic time
         self._user_cooldowns: dict[int, float] = {}  # user_id -> last-reply monotonic time
@@ -365,7 +373,27 @@ class ChatMonitorCog(commands.Cog):
                 provider = provider_cls(endpoint=settings.AI_ENDPOINT)
             except TypeError:
                 provider = provider_cls()
-            answer = await provider.complete(prompt)
+
+            async def _run_inference() -> str:
+                async with self._inference_semaphore:
+                    return await provider.complete(prompt)
+
+            answer = await asyncio.wait_for(
+                _run_inference(),
+                timeout=self._inference_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logging.warning(
+                "ChatMonitor: inference timed out after %ss in channel_id=%s",
+                self._inference_timeout_seconds,
+                message.channel.id,
+            )
+            await message.reply(
+                "I took too long to answer (the model may be waking up or busy). "
+                "Please try again in a moment.",
+                mention_author=False,
+            )
+            return
         except Exception:
             logging.exception("ChatMonitor: AI completion failed")
             await message.reply(

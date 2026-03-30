@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     POSTGRES_SSL: str = "prefer"
     AI_PROVIDER: str = "local_stub"
     AI_ENDPOINT: str = "http://localhost:8000/v1"
+    AI_REQUEST_TIMEOUT_SECONDS: int = 120
+    AI_MAX_CONCURRENT_REQUESTS: int = 2
     LOG_LEVEL: str = "INFO"
     COMMAND_RESYNC_MINUTES: int = 30
     CHAT_MONITOR_ENABLED: bool = True

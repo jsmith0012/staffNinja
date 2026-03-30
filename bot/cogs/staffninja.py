@@ -600,6 +600,12 @@ class EventNinjaGroup(app_commands.Group):
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        async def _send_ephemeral(content: str):
+            # After defer, all replies must go through followup to avoid interaction timeout failures.
+            await interaction.followup.send(content, ephemeral=True)
+
         logging.debug(
             "Policy search initialized: user_id=%s provider=%s search_query=%s",
             user_id,
@@ -657,9 +663,8 @@ class EventNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Policy document lookup failed")
-            await interaction.response.send_message(
+            await _send_ephemeral(
                 f"Document lookup failed: {exc.__class__.__name__}",
-                ephemeral=True,
             )
             return
 
@@ -695,9 +700,8 @@ class EventNinjaGroup(app_commands.Group):
                     )
                 except Exception as exc:
                     logging.exception("Policy document fallback lookup failed")
-                    await interaction.response.send_message(
+                    await _send_ephemeral(
                         f"Document lookup failed: {exc.__class__.__name__}",
-                        ephemeral=True,
                     )
                     return
 
@@ -709,9 +713,8 @@ class EventNinjaGroup(app_commands.Group):
                 used_fallback,
                 like_terms,
             )
-            await interaction.response.send_message(
+            await _send_ephemeral(
                 "I can only answer from the Document table and found no matching policy text.",
-                ephemeral=True,
             )
             return
 
@@ -759,9 +762,8 @@ class EventNinjaGroup(app_commands.Group):
                     docs_with_text.append(merged)
             except Exception as exc:
                 logging.exception("Policy deep document lookup failed")
-                await interaction.response.send_message(
+                await _send_ephemeral(
                     f"Document lookup failed: {exc.__class__.__name__}",
-                    ephemeral=True,
                 )
                 return
 
@@ -773,9 +775,8 @@ class EventNinjaGroup(app_commands.Group):
                 used_fallback,
                 like_terms,
             )
-            await interaction.response.send_message(
+            await _send_ephemeral(
                 "I can only answer from the Document table and found no matching policy text.",
-                ephemeral=True,
             )
             return
 
@@ -870,17 +871,28 @@ class EventNinjaGroup(app_commands.Group):
             except TypeError:
                 provider = provider_cls()
 
-            answer = await provider.complete(prompt)
+            inference_timeout = max(10, int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)))
+            answer = await asyncio.wait_for(provider.complete(prompt), timeout=inference_timeout)
             logging.debug(
                 "Policy AI completion succeeded: user_id=%s raw_answer_chars=%s",
                 user_id,
                 len((answer or "")),
             )
+        except asyncio.TimeoutError:
+            logging.warning(
+                "Policy AI completion timed out: user_id=%s timeout=%ss",
+                user_id,
+                int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)),
+            )
+            await _send_ephemeral(
+                "That request took too long (the model may be loading or under heavy use). "
+                "Please try again in a moment."
+            )
+            return
         except Exception as exc:
             logging.exception("Policy AI completion failed")
-            await interaction.response.send_message(
+            await _send_ephemeral(
                 f"AI policy response failed: {exc.__class__.__name__}",
-                ephemeral=True,
             )
             return
 
@@ -923,7 +935,7 @@ class EventNinjaGroup(app_commands.Group):
             safe_question,
             safe_answer,
         )
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await _send_ephemeral("\n".join(lines))
 
 
 class StaffNinjaCog(commands.Cog):
