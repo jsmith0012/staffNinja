@@ -4,6 +4,7 @@ import discord
 from discord.ext import commands
 from config.settings import get_settings
 from db.connection import Database
+from jobs import Scheduler
 from utils.logging import setup_logging
 
 # Load config and setup logging
@@ -29,6 +30,7 @@ periodic_resync_task: asyncio.Task | None = None
 debug_log_task: asyncio.Task | None = None
 debug_log_handler_installed = False
 debug_log_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=DEBUG_LOG_QUEUE_MAXSIZE)
+job_scheduler: Scheduler | None = None
 
 
 class DiscordDebugLogHandler(logging.Handler):
@@ -291,6 +293,26 @@ async def ensure_staff_stats_channels():
     except Exception as exc:
         logging.exception("Failed updating Staff Stats channels: %s", exc)
 
+async def _ensure_jobs_table():
+    """Run the job-queue migration (idempotent).
+
+    asyncpg does not support multiple statements in a single execute(),
+    so we split on semicolons and run each non-empty statement separately.
+    """
+    import pathlib
+    migration = pathlib.Path(__file__).resolve().parent.parent / "db" / "migrations" / "001_create_jobs_table.sql"
+    if not migration.exists():
+        return
+    sql = migration.read_text(encoding="utf-8")
+    for statement in sql.split(";"):
+        # Strip leading SQL comment lines before checking if anything remains.
+        lines = [ln for ln in statement.strip().splitlines() if not ln.strip().startswith("--")]
+        body = "\n".join(lines).strip()
+        if body:
+            await Database.execute(statement.strip())
+    logging.info("Job queue migration applied (idempotent)")
+
+
 # Load cogs dynamically
 async def load_cogs():
     for cog in ["staff_status", "reminders", "org_tools", "staffninja", "chat_monitor"]:
@@ -331,10 +353,25 @@ async def periodic_command_resync_loop():
 
 @bot.event
 async def on_ready():
-    global periodic_resync_task
+    global periodic_resync_task, job_scheduler
 
     if not hasattr(bot, "launch_time"):
         bot.launch_time = discord.utils.utcnow()
+
+    # Run job-queue migration (idempotent CREATE TABLE IF NOT EXISTS)
+    await _ensure_jobs_table()
+
+    # Start job worker
+    if job_scheduler is None:
+        from jobs.queue import reap_stale_jobs
+        job_scheduler = Scheduler(poll_interval=settings.JOB_WORKER_POLL_SECONDS)
+
+        async def _reap():
+            await reap_stale_jobs(settings.JOB_STALE_TIMEOUT_SECONDS)
+
+        job_scheduler.add_periodic(_reap, max(60.0, settings.JOB_STALE_TIMEOUT_SECONDS / 2))
+        await job_scheduler.start()
+        logging.info("Job queue scheduler started")
 
     await sync_app_commands("on_ready")
     await ensure_debug_log_forwarding()
@@ -415,6 +452,19 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
         error,
     )
 
+async def shutdown():
+    """Gracefully stop the job scheduler before the bot closes."""
+    global job_scheduler
+    if job_scheduler is not None:
+        await job_scheduler.stop()
+        job_scheduler = None
+    await Database.close()
+    logging.info("Shutdown complete")
+
+
 if __name__ == "__main__":
     asyncio.run(load_cogs())
-    bot.run(settings.DISCORD_TOKEN)
+    try:
+        bot.run(settings.DISCORD_TOKEN)
+    finally:
+        asyncio.run(shutdown())

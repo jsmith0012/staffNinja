@@ -102,6 +102,34 @@ class StaffNinjaGroup(app_commands.Group):
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+    @app_commands.command(name="jobs", description="Show job queue status and recent failures")
+    async def jobs(self, interaction: discord.Interaction):
+        from jobs.queue import job_counts, recent_failed
+        from jobs.handlers import registered_types
+
+        counts = await job_counts()
+        total = sum(counts.values())
+
+        lines = [
+            "**Job Queue Status**",
+            f"- Pending: **{counts.get('pending', 0)}**",
+            f"- Running: **{counts.get('running', 0)}**",
+            f"- Completed: **{counts.get('completed', 0)}**",
+            f"- Failed: **{counts.get('failed', 0)}**",
+            f"- Total: **{total}**",
+            f"- Registered handlers: {', '.join(registered_types()) or '(none)'}",
+        ]
+
+        failed = await recent_failed(limit=5)
+        if failed:
+            lines.append("\n**Recent Failures:**")
+            for j in failed:
+                err_preview = (j.error or "unknown")[:80]
+                ts = j.completed_at.strftime("%m-%d %H:%M") if j.completed_at else "?"
+                lines.append(f"  `#{j.id}` {j.job_type} ({ts}) — {err_preview}")
+
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
     @app_commands.command(name="help", description="Show available slash commands")
     async def help(self, interaction: discord.Interaction):
         lines = [
@@ -110,6 +138,7 @@ class StaffNinjaGroup(app_commands.Group):
             "- /staffninja help: this command list",
             "- /staffninja status: your staff profile/status from the User table",
             "- /staffninja event: active event status and related metrics",
+            "- /staffninja jobs: job queue status and recent failures",
             "- /eventninja policy <question>: answers from Document table excerpts only",
             "- /staffninja link email:<you@example.com>: sends a verification code to your email",
             "- /staffninja verify code:<123456>: verifies code and links your Discord account",

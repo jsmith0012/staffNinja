@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     CHAT_MONITOR_COOLDOWN_SECONDS: int = 30
     CHAT_MONITOR_USER_COOLDOWN_SECONDS: int = 20
     CHAT_MONITOR_MAX_QUESTION_CHARS: int = 600
+    JOB_WORKER_POLL_SECONDS: float = 5.0
+    JOB_STALE_TIMEOUT_SECONDS: int = 600
 
 def get_settings() -> Settings:
     return Settings()
