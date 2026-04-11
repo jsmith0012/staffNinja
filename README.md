@@ -34,6 +34,21 @@ A modular, maintainable Discord bot for Anime Nebraskon staff support.
 - Unit tests: `pytest tests/`
 - Integration/contract tests: see `tests/`
 
+## Documentation
+- Copilot instruction entrypoint: `.github/copilot-instructions.md`
+- Knowledge pack index: `docs/README.md`
+- Architecture guide: `docs/ARCHITECTURE.md`
+- Development workflow: `docs/DEVELOPMENT.md`
+- Bot cogs patterns: `docs/BOT_COGS_GUIDE.md`
+- Service layer patterns: `docs/SERVICE_LAYER_GUIDE.md`
+- Database conventions: `docs/DATABASE_GUIDE.md`
+- Job queue patterns: `docs/JOB_QUEUE_GUIDE.md`
+- Testing guide: `docs/TESTING.md`
+- Agent framework status: `docs/AGENT_FRAMEWORK.md`
+- Troubleshooting: `docs/ERRORS_AND_TROUBLESHOOTING.md`
+
+This documentation set is the syncable Copilot knowledge pack for cross-PC consistency.
+
 ## Deployment
 - Use a process manager (systemd, pm2, etc.)
 - Configure environment variables for production
