@@ -340,69 +340,95 @@ class ChatMonitorCog(commands.Cog):
             sources.append(f"{doc_id}:{title}")
             allowed_ids.append(str(doc_id))
 
-        prompt = (
-            "You are a helpful convention information assistant. "
-            "Answer the attendee's question using ONLY the provided document excerpts. "
-            "Do not use prior knowledge or information not found in the excerpts below. "
-            "Be friendly, concise, and direct. If multiple documents are relevant, summarise "
-            "the key points from each. If the excerpts do not contain enough information to "
-            "answer the question, say so clearly and suggest the attendee contact staff.\n\n"
-            "Response format:\n"
-            "1) Give a direct, conversational answer (2-5 sentences).\n"
-            "2) Optionally list 1-3 source lines: - Doc <id> | <title> | relevance: <short reason>\n"
-            "3) If the excerpts are insufficient, reply: "
-            "I don't have enough information in my documents to answer that. Please ask a staff member!\n\n"
-            f"Only cite document IDs from this allowed list: {', '.join(allowed_ids)}\n\n"
-            f"Question: {question}\n\n"
-            "Document excerpts:\n"
-            + "\n\n---\n\n".join(context_chunks)
-        )
-
         provider_name = (getattr(settings, "AI_PROVIDER", "") or "").strip().lower()
-        provider_cls = get_provider(provider_name)
-        if not provider_cls:
-            logging.error("ChatMonitor: AI provider %r not registered.", provider_name)
-            await message.reply(
-                "Convention Q&A is temporarily unavailable (AI provider not configured).",
-                mention_author=False,
-            )
-            return
+        use_ai = provider_name not in ("db_search", "none", "disabled")
 
-        try:
+        if use_ai:
+            prompt = (
+                "You are a helpful convention information assistant. "
+                "Answer the attendee's question using ONLY the provided document excerpts. "
+                "Do not use prior knowledge or information not found in the excerpts below. "
+                "Be friendly, concise, and direct. If multiple documents are relevant, summarise "
+                "the key points from each. If the excerpts do not contain enough information to "
+                "answer the question, say so clearly and suggest the attendee contact staff.\n\n"
+                "Response format:\n"
+                "1) Give a direct, conversational answer (2-5 sentences).\n"
+                "2) Optionally list 1-3 source lines: - Doc <id> | <title> | relevance: <short reason>\n"
+                "3) If the excerpts are insufficient, reply: "
+                "I don't have enough information in my documents to answer that. Please ask a staff member!\n\n"
+                f"Only cite document IDs from this allowed list: {', '.join(allowed_ids)}\n\n"
+                f"Question: {question}\n\n"
+                "Document excerpts:\n"
+                + "\n\n---\n\n".join(context_chunks)
+            )
+
+            provider_cls = get_provider(provider_name)
+            if not provider_cls:
+                logging.error("ChatMonitor: AI provider %r not registered.", provider_name)
+                await message.reply(
+                    "Convention Q&A is temporarily unavailable (AI provider not configured).",
+                    mention_author=False,
+                )
+                return
+
             try:
-                provider = provider_cls(endpoint=settings.AI_ENDPOINT)
-            except TypeError:
-                provider = provider_cls()
+                try:
+                    provider = provider_cls(endpoint=settings.AI_ENDPOINT)
+                except TypeError:
+                    provider = provider_cls()
 
-            async def _run_inference() -> str:
-                async with self._inference_semaphore:
-                    return await provider.complete(prompt)
+                async def _run_inference() -> str:
+                    async with self._inference_semaphore:
+                        return await provider.complete(prompt)
 
-            answer = await asyncio.wait_for(
-                _run_inference(),
-                timeout=self._inference_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            logging.warning(
-                "ChatMonitor: inference timed out after %ss in channel_id=%s",
-                self._inference_timeout_seconds,
-                message.channel.id,
-            )
-            await message.reply(
-                "I took too long to answer (the model may be waking up or busy). "
-                "Please try again in a moment.",
-                mention_author=False,
-            )
-            return
-        except Exception:
-            logging.exception("ChatMonitor: AI completion failed")
-            await message.reply(
-                "I ran into a problem generating an answer. Please ask a staff member!",
-                mention_author=False,
-            )
-            return
+                answer = await asyncio.wait_for(
+                    _run_inference(),
+                    timeout=self._inference_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                logging.warning(
+                    "ChatMonitor: inference timed out after %ss in channel_id=%s",
+                    self._inference_timeout_seconds,
+                    message.channel.id,
+                )
+                await message.reply(
+                    "I took too long to answer (the model may be waking up or busy). "
+                    "Please try again in a moment.",
+                    mention_author=False,
+                )
+                return
+            except Exception:
+                logging.exception("ChatMonitor: AI completion failed")
+                await message.reply(
+                    "I ran into a problem generating an answer. Please ask a staff member!",
+                    mention_author=False,
+                )
+                return
 
-        raw_answer = (answer or "").strip() or "(no response)"
+            raw_answer = (answer or "").strip() or "(no response)"
+        else:
+            # ---- db_search mode: build answer from top document snippets ----
+            answer_parts = []
+            for row in docs[:3]:
+                title = row.get("title") or "(untitled)"
+                snippet = _truncate(
+                    extract_relevant_sections(
+                        str(row.get("document_value") or ""),
+                        question_terms,
+                        section_size=200,
+                        max_sections=1,
+                    ).replace("\n", " ").strip(),
+                    200,
+                )
+                if snippet:
+                    answer_parts.append(f"**{title}**: {snippet}")
+            if answer_parts:
+                raw_answer = "Here's what I found:\n" + "\n".join(answer_parts)
+            else:
+                raw_answer = (
+                    "I don't have enough information in my documents to answer that. "
+                    "Please ask a staff member!"
+                )
         raw_answer = _sanitize_answer_text(raw_answer)
         if _output_looks_sensitive(raw_answer):
             logging.warning(

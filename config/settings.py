@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     POSTGRES_SSL: str = "prefer"
     AI_PROVIDER: str = "local_stub"
     AI_ENDPOINT: str = "http://localhost:8000/v1"
+    AI_MODEL: str = "qwen2.5:3b"
     AI_REQUEST_TIMEOUT_SECONDS: int = 120
     AI_MAX_CONCURRENT_REQUESTS: int = 2
     LOG_LEVEL: str = "INFO"

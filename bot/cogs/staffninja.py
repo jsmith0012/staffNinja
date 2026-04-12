@@ -616,18 +616,21 @@ class EventNinjaGroup(app_commands.Group):
             return
 
         provider_name = (settings.AI_PROVIDER or "").strip().lower()
-        provider_cls = get_provider(provider_name)
-        if not provider_cls:
-            logging.error(
-                "Policy question failed: provider not registered user_id=%s provider=%s",
-                user_id,
-                provider_name,
-            )
-            await interaction.response.send_message(
-                f"AI provider '{provider_name}' is not registered.",
-                ephemeral=True,
-            )
-            return
+        use_ai = provider_name not in ("db_search", "none", "disabled")
+        provider_cls = None
+        if use_ai:
+            provider_cls = get_provider(provider_name)
+            if not provider_cls:
+                logging.error(
+                    "Policy question failed: provider not registered user_id=%s provider=%s",
+                    user_id,
+                    provider_name,
+                )
+                await interaction.response.send_message(
+                    f"AI provider '{provider_name}' is not registered.",
+                    ephemeral=True,
+                )
+                return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -866,66 +869,86 @@ class EventNinjaGroup(app_commands.Group):
             doc_debug_rows,
         )
 
-        prompt = (
-            "You are a policy locator. Use ONLY the provided document excerpts from the database. "
-            "Do not use prior knowledge, web data, or any source not included below. "
-            "Do NOT answer hypothetical scenarios directly (for example, do not state what punishment would happen). "
-            "Do NOT infer outcomes, discipline, or consequences that are not explicitly written in the excerpts. "
-            "Instead, identify the most relevant policies and explain why each is relevant to the user's question. "
-            "Prefer policies with explicit language that directly matches the question's intent or terms.\n\n"
-            "Response format rules:\n"
-            "1) Start with: Relevant policies\n"
-            "2) Return 1-4 bullet lines in this exact style: - Doc <id> | <title> | relevance: <short reason>\n"
-            "3) Each reason must reference concrete wording from the excerpt (not generic guesses).\n"
-            "4) If no excerpt directly addresses the question, include: - No direct policy match found in provided excerpts.\n"
-            "5) Optionally add one final line starting with: Clarify: <question> if the policy text is ambiguous\n"
-            "6) If excerpts are insufficient, reply exactly: I can only answer from the Document table and the provided excerpts are insufficient.\n\n"
-            f"Only use document IDs from this allowed list when citing: {', '.join(allowed_doc_ids)}\n\n"
-            f"Question key terms: {', '.join(score_terms) if score_terms else '(none)'}\n\n"
-            f"User question:\n{clean_question}\n\n"
-            "Document excerpts:\n"
-            + "\n\n---\n\n".join(context_chunks)
-        )
+        if use_ai:
+            prompt = (
+                "You are a policy locator. Use ONLY the provided document excerpts from the database. "
+                "Do not use prior knowledge, web data, or any source not included below. "
+                "Do NOT answer hypothetical scenarios directly (for example, do not state what punishment would happen). "
+                "Do NOT infer outcomes, discipline, or consequences that are not explicitly written in the excerpts. "
+                "Instead, identify the most relevant policies and explain why each is relevant to the user's question. "
+                "Prefer policies with explicit language that directly matches the question's intent or terms.\n\n"
+                "Response format rules:\n"
+                "1) Start with: Relevant policies\n"
+                "2) Return 1-4 bullet lines in this exact style: - Doc <id> | <title> | relevance: <short reason>\n"
+                "3) Each reason must reference concrete wording from the excerpt (not generic guesses).\n"
+                "4) If no excerpt directly addresses the question, include: - No direct policy match found in provided excerpts.\n"
+                "5) Optionally add one final line starting with: Clarify: <question> if the policy text is ambiguous\n"
+                "6) If excerpts are insufficient, reply exactly: I can only answer from the Document table and the provided excerpts are insufficient.\n\n"
+                f"Only use document IDs from this allowed list when citing: {', '.join(allowed_doc_ids)}\n\n"
+                f"Question key terms: {', '.join(score_terms) if score_terms else '(none)'}\n\n"
+                f"User question:\n{clean_question}\n\n"
+                "Document excerpts:\n"
+                + "\n\n---\n\n".join(context_chunks)
+            )
 
-        logging.debug(
-            "Policy prompt prepared: user_id=%s prompt_chars=%s allowed_doc_ids=%s",
-            user_id,
-            len(prompt),
-            allowed_doc_ids,
-        )
-
-        try:
-            try:
-                provider = provider_cls(endpoint=settings.AI_ENDPOINT)
-            except TypeError:
-                provider = provider_cls()
-
-            inference_timeout = max(10, int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)))
-            answer = await asyncio.wait_for(provider.complete(prompt), timeout=inference_timeout)
             logging.debug(
-                "Policy AI completion succeeded: user_id=%s raw_answer_chars=%s",
+                "Policy prompt prepared: user_id=%s prompt_chars=%s allowed_doc_ids=%s",
                 user_id,
-                len((answer or "")),
+                len(prompt),
+                allowed_doc_ids,
             )
-        except asyncio.TimeoutError:
-            logging.warning(
-                "Policy AI completion timed out: user_id=%s timeout=%ss",
-                user_id,
-                int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)),
-            )
-            await _send_ephemeral(
-                "That request took too long (the model may be loading or under heavy use). "
-                "Please try again in a moment."
-            )
-            return
-        except Exception as exc:
-            logging.exception("Policy AI completion failed")
-            await _send_ephemeral(
-                f"AI policy response failed: {exc.__class__.__name__}",
-            )
-            return
 
-        final_answer = self._truncate((answer or "").strip() or "(no response)", 1600)
+            try:
+                try:
+                    provider = provider_cls(endpoint=settings.AI_ENDPOINT)
+                except TypeError:
+                    provider = provider_cls()
+
+                inference_timeout = max(10, int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)))
+                answer = await asyncio.wait_for(provider.complete(prompt), timeout=inference_timeout)
+                logging.debug(
+                    "Policy AI completion succeeded: user_id=%s raw_answer_chars=%s",
+                    user_id,
+                    len((answer or "")),
+                )
+            except asyncio.TimeoutError:
+                logging.warning(
+                    "Policy AI completion timed out: user_id=%s timeout=%ss",
+                    user_id,
+                    int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)),
+                )
+                await _send_ephemeral(
+                    "That request took too long (the model may be loading or under heavy use). "
+                    "Please try again in a moment."
+                )
+                return
+            except Exception as exc:
+                logging.exception("Policy AI completion failed")
+                await _send_ephemeral(
+                    f"AI policy response failed: {exc.__class__.__name__}",
+                )
+                return
+
+            final_answer = self._truncate((answer or "").strip() or "(no response)", 1600)
+        else:
+            # ---- db_search mode: format results directly (no LLM) ----
+            bullets = []
+            for row in docs[:4]:
+                doc_id = int(row["Id"])
+                title = row.get("title") or "(untitled)"
+                snippet = self._extract_relevant_sections(
+                    str(row.get("document_value", "")), search_terms,
+                    section_size=200, max_sections=1,
+                )
+                # Use a concise snippet as the relevance reason
+                reason = snippet.replace("\n", " ").strip()
+                reason = self._truncate(reason, 120) if reason else "matches search terms"
+                bullets.append(f"- Doc {doc_id} | {title} | relevance: {reason}")
+            final_answer = "Relevant policies\n" + "\n".join(bullets)
+            logging.info(
+                "Policy db_search completed: user_id=%s results=%s",
+                user_id, len(bullets),
+            )
         final_answer = self._linkify_policy_lines(final_answer)
         source_line = self._truncate(", ".join(sources), 500)
         safe_question = self._truncate(clean_question, 300)
