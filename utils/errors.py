@@ -7,3 +7,6 @@ class DatabaseError(StaffNinjaError):
 
 class NotFoundError(StaffNinjaError):
     pass
+
+class GoogleGroupsError(StaffNinjaError):
+    pass

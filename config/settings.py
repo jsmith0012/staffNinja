@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     CHAT_MONITOR_MAX_QUESTION_CHARS: int = 600
     JOB_WORKER_POLL_SECONDS: float = 5.0
     JOB_STALE_TIMEOUT_SECONDS: int = 600
+    GOOGLE_SERVICE_ACCOUNT_FILE: str | None = None
+    GOOGLE_DELEGATED_ADMIN: str | None = None
+    MAILINGLIST_GROUPS: str = ""
+    MAILINGLIST_PROTECTED_GROUPS: str = ""
 
 def get_settings() -> Settings:
     return Settings()

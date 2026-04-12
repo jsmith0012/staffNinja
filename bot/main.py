@@ -315,7 +315,7 @@ async def _ensure_jobs_table():
 
 # Load cogs dynamically
 async def load_cogs():
-    for cog in ["staff_status", "reminders", "org_tools", "staffninja", "chat_monitor"]:
+    for cog in ["staff_status", "reminders", "org_tools", "staffninja", "chat_monitor", "mailing_lists"]:
         try:
             await bot.load_extension(f"bot.cogs.{cog}")
         except Exception as e:
