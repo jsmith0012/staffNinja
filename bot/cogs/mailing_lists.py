@@ -90,7 +90,7 @@ class MailingListView(discord.ui.View):
         return True
 
     async def _on_unsubscribe(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         selected = interaction.data.get("values", [])
         results = []
         for group_email in selected:
@@ -106,11 +106,11 @@ class MailingListView(discord.ui.View):
 
         self._rebuild_selects()
         embed = _build_embed(self.groups)
+        await interaction.edit_original_response(embed=embed, view=self)
         await interaction.followup.send("\n".join(results), ephemeral=True)
-        await interaction.message.edit(embed=embed, view=self)
 
     async def _on_subscribe(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         selected = interaction.data.get("values", [])
         results = []
         for group_email in selected:
@@ -126,8 +126,8 @@ class MailingListView(discord.ui.View):
 
         self._rebuild_selects()
         embed = _build_embed(self.groups)
+        await interaction.edit_original_response(embed=embed, view=self)
         await interaction.followup.send("\n".join(results), ephemeral=True)
-        await interaction.message.edit(embed=embed, view=self)
 
 
 def _build_embed(groups: list[dict]) -> discord.Embed:
