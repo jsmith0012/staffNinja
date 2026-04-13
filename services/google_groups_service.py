@@ -57,42 +57,11 @@ def get_protected_groups() -> set[str]:
     return {g.strip().lower() for g in raw.split(",") if g.strip()}
 
 
-def get_leadership_positions() -> set[str]:
-    """Return the set of staff position names considered leadership."""
-    settings = get_settings()
-    raw = settings.LEADERSHIP_POSITIONS.strip()
-    if not raw:
-        return set()
-    return {p.strip().lower() for p in raw.split(",") if p.strip()}
+def is_protected(group_email: str) -> bool:
+    return group_email.strip().lower() in get_protected_groups()
 
 
-def get_leadership_protected_groups() -> set[str]:
-    """Return group emails that leadership staff cannot opt out of."""
-    settings = get_settings()
-    raw = settings.LEADERSHIP_PROTECTED_GROUPS.strip()
-    if not raw:
-        return set()
-    return {g.strip().lower() for g in raw.split(",") if g.strip()}
-
-
-def is_protected(group_email: str, user_positions: list[str] | None = None) -> bool:
-    """Check if a group is protected for the given user.
-
-    A group is protected if it's in the global protected list, or if the user
-    holds a leadership position and the group is in the leadership-protected list.
-    """
-    email = group_email.strip().lower()
-    if email in get_protected_groups():
-        return True
-    if user_positions:
-        lp = get_leadership_positions()
-        if lp and any(p.lower() in lp for p in user_positions):
-            if email in get_leadership_protected_groups():
-                return True
-    return False
-
-
-async def get_user_groups(user_email: str, user_positions: list[str] | None = None) -> list[dict]:
+async def get_user_groups(user_email: str) -> list[dict]:
     """Return the configured mailing-list groups with membership status for a user.
 
     Returns a list of dicts: {"email", "name", "description", "is_member", "is_protected"}
@@ -102,11 +71,6 @@ async def get_user_groups(user_email: str, user_positions: list[str] | None = No
         return []
 
     protected = get_protected_groups()
-    leadership_protected = set()
-    if user_positions:
-        lp = get_leadership_positions()
-        if lp and any(p.lower() in lp for p in user_positions):
-            leadership_protected = get_leadership_protected_groups()
 
     try:
         service = _build_service()
@@ -142,14 +106,14 @@ async def get_user_groups(user_email: str, user_positions: list[str] | None = No
             "name": info["name"] or email.split("@")[0],
             "description": info["description"],
             "is_member": email in member_groups,
-            "is_protected": email in protected or email in leadership_protected,
+            "is_protected": email in protected,
         })
     return results
 
 
-async def remove_member(group_email: str, user_email: str, user_positions: list[str] | None = None) -> None:
+async def remove_member(group_email: str, user_email: str) -> None:
     """Remove a user from a Google Group (opt out)."""
-    if is_protected(group_email, user_positions):
+    if is_protected(group_email):
         raise GoogleGroupsError(f"Cannot opt out of protected group: {group_email}")
 
     try:

@@ -43,8 +43,6 @@ class Settings(BaseSettings):
     GOOGLE_DELEGATED_ADMIN: str | None = None
     MAILINGLIST_GROUPS: str = ""
     MAILINGLIST_PROTECTED_GROUPS: str = ""
-    LEADERSHIP_POSITIONS: str = ""
-    LEADERSHIP_PROTECTED_GROUPS: str = ""
 
 def get_settings() -> Settings:
     return Settings()
