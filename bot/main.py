@@ -156,7 +156,12 @@ async def ensure_debug_log_forwarding():
 
 async def _get_staff_stats_counts() -> tuple[int, int]:
     active_rows = await Database.fetch(
-        'SELECT COUNT(*) AS total FROM "User" WHERE COALESCE("Status", 0) = 1'
+        '''
+        SELECT COUNT(DISTINCT u."Id") AS total
+        FROM "User" u
+        INNER JOIN "UserStaffPosition" usp ON usp."UserId" = u."Id"
+        WHERE COALESCE(u."Status", 0) = 1
+        '''
     )
     active_staff = int(active_rows[0]["total"]) if active_rows else 0
 
