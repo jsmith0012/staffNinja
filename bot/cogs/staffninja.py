@@ -21,7 +21,7 @@ from services.document_search_service import (
     search_documents as _svc_search_documents,
 )
 from services import google_groups_service
-from bot.cogs.mailing_lists import _get_user_email, _build_embed, MailingListView
+from bot.cogs.mailing_lists import _get_user_email, _get_user_positions, _build_embed, MailingListView
 from utils.errors import GoogleGroupsError
 
 settings = get_settings()
@@ -542,6 +542,8 @@ class StaffNinjaGroup(app_commands.Group):
             )
             return
 
+        positions = await _get_user_positions(interaction.user)
+
         allowed = google_groups_service.get_allowed_groups()
         if not allowed:
             await interaction.followup.send(
@@ -551,7 +553,7 @@ class StaffNinjaGroup(app_commands.Group):
             return
 
         try:
-            groups = await google_groups_service.get_user_groups(email)
+            groups = await google_groups_service.get_user_groups(email, positions)
         except GoogleGroupsError as exc:
             await interaction.followup.send(
                 f"Failed to retrieve mailing lists: {exc}",
@@ -560,7 +562,7 @@ class StaffNinjaGroup(app_commands.Group):
             return
 
         embed = _build_embed(groups)
-        view = MailingListView(invoker_id=interaction.user.id, user_email=email, groups=groups)
+        view = MailingListView(invoker_id=interaction.user.id, user_email=email, groups=groups, user_positions=positions)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ---- policy command (formerly /eventninja policy) ----

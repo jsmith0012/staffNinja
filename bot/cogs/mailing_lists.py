@@ -9,6 +9,29 @@ from utils.errors import GoogleGroupsError
 logger = logging.getLogger(__name__)
 
 
+async def _get_user_positions(discord_user: discord.User | discord.Member) -> list[str]:
+    """Return the staff position names for a Discord user."""
+    user_id = str(discord_user.id)
+    candidates = {user_id, user_id.lower()}
+    for attr in ("name", "global_name", "display_name"):
+        val = str(getattr(discord_user, attr, "") or "").strip().lower()
+        if val:
+            candidates.add(val)
+            candidates.add(val.lstrip("@"))
+
+    rows = await Database.fetch(
+        """
+        SELECT sp."Name" AS position_name
+        FROM "User" u
+        JOIN "UserStaffPosition" usp ON usp."UserId" = u."Id"
+        JOIN "StaffPosition" sp ON sp."Id" = usp."StaffPositionId"
+        WHERE LOWER(TRIM(BOTH '@' FROM COALESCE(u."Discord", ''))) = ANY($1::text[])
+        """,
+        list(candidates),
+    )
+    return [r["position_name"] for r in rows]
+
+
 async def _get_user_email(discord_user: discord.User | discord.Member) -> str | None:
     """Look up the linked email for a Discord user from the User table."""
     user_id = str(discord_user.id)
@@ -36,11 +59,12 @@ async def _get_user_email(discord_user: discord.User | discord.Member) -> str | 
 class MailingListView(discord.ui.View):
     """Interactive view with select menus for subscribe/unsubscribe actions."""
 
-    def __init__(self, invoker_id: int, user_email: str, groups: list[dict]):
+    def __init__(self, invoker_id: int, user_email: str, groups: list[dict], user_positions: list[str] | None = None):
         super().__init__(timeout=120)
         self.invoker_id = invoker_id
         self.user_email = user_email
         self.groups = groups
+        self.user_positions = user_positions or []
         self._rebuild_selects()
 
     def _rebuild_selects(self):
@@ -93,7 +117,7 @@ class MailingListView(discord.ui.View):
         results = []
         for group_email in selected:
             try:
-                await google_groups_service.remove_member(group_email, self.user_email)
+                await google_groups_service.remove_member(group_email, self.user_email, self.user_positions)
                 results.append(f"✅ Unsubscribed from **{group_email}**")
                 for g in self.groups:
                     if g["email"] == group_email:
