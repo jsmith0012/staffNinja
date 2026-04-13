@@ -20,6 +20,9 @@ from services.document_search_service import (
     extract_relevant_sections as _svc_extract_relevant_sections,
     search_documents as _svc_search_documents,
 )
+from services import google_groups_service
+from bot.cogs.mailing_lists import _get_user_email, _build_embed, MailingListView
+from utils.errors import GoogleGroupsError
 
 settings = get_settings()
 
@@ -524,13 +527,47 @@ class StaffNinjaGroup(app_commands.Group):
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
-class EventNinjaGroup(app_commands.Group):
+    # ---- mailing list command ----
+
+    @app_commands.command(name="mailinglist", description="View and manage your mailing list subscriptions")
+    async def mailinglist(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        email = await _get_user_email(interaction.user)
+        if not email:
+            await interaction.followup.send(
+                "Your Discord account is not linked to a staff record. "
+                "Use `/staffninja link` to connect your account first.",
+                ephemeral=True,
+            )
+            return
+
+        allowed = google_groups_service.get_allowed_groups()
+        if not allowed:
+            await interaction.followup.send(
+                "No mailing lists are configured. Contact an admin.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            groups = await google_groups_service.get_user_groups(email)
+        except GoogleGroupsError as exc:
+            await interaction.followup.send(
+                f"Failed to retrieve mailing lists: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        embed = _build_embed(groups)
+        view = MailingListView(invoker_id=interaction.user.id, user_email=email, groups=groups)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ---- policy command (formerly /eventninja policy) ----
+
     POLICY_URL_PREFIX = "https://staff.animenebraskon.com/staff/policy/"
     POLICY_DEEP_ANALYZE_LIMIT = 40
     POLICY_CONTEXT_LIMIT = 16
-
-    def __init__(self):
-        super().__init__(name="eventninja", description="Event policy commands")
 
     @staticmethod
     def _truncate(value: str, limit: int) -> str:
@@ -994,13 +1031,10 @@ class StaffNinjaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.group = StaffNinjaGroup()
-        self.eventninja_group = EventNinjaGroup()
         self.bot.tree.add_command(self.group)
-        self.bot.tree.add_command(self.eventninja_group)
 
     def cog_unload(self):
         self.bot.tree.remove_command(self.group.name, type=self.group.type)
-        self.bot.tree.remove_command(self.eventninja_group.name, type=self.eventninja_group.type)
 
 
 async def setup(bot: commands.Bot):

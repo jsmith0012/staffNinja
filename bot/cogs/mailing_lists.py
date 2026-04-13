@@ -1,8 +1,6 @@
 import logging
 
 import discord
-from discord import app_commands
-from discord.ext import commands
 
 from db.connection import Database
 from services import google_groups_service
@@ -150,56 +148,3 @@ def _build_embed(groups: list[dict]) -> discord.Embed:
         embed.add_field(name=f"{status}  {name}", value=desc, inline=False)
 
     return embed
-
-
-class MailingListGroup(app_commands.Group):
-    def __init__(self):
-        super().__init__(name="mailinglist", description="Manage your mailing list subscriptions")
-
-    @app_commands.command(name="list", description="View your mailing list subscriptions and opt in/out")
-    async def list_groups(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        email = await _get_user_email(interaction.user)
-        if not email:
-            await interaction.followup.send(
-                "Your Discord account is not linked to a staff record. "
-                "Use `/staffninja link` to connect your account first.",
-                ephemeral=True,
-            )
-            return
-
-        allowed = google_groups_service.get_allowed_groups()
-        if not allowed:
-            await interaction.followup.send(
-                "No mailing lists are configured. Contact an admin.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            groups = await google_groups_service.get_user_groups(email)
-        except GoogleGroupsError as exc:
-            await interaction.followup.send(
-                f"Failed to retrieve mailing lists: {exc}",
-                ephemeral=True,
-            )
-            return
-
-        embed = _build_embed(groups)
-        view = MailingListView(invoker_id=interaction.user.id, user_email=email, groups=groups)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-
-class MailingListCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        self.group = MailingListGroup()
-        self.bot.tree.add_command(self.group)
-
-    def cog_unload(self):
-        self.bot.tree.remove_command(self.group.name, type=self.group.type)
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(MailingListCog(bot))
