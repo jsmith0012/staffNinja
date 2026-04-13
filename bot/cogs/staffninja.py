@@ -414,7 +414,8 @@ class StaffNinjaGroup(app_commands.Group):
                 u."Allergy" AS allergies,
                 u."YearJoined" AS year_joined,
                 u."Status" AS status_code,
-                COALESCE(string_agg(DISTINCT sp."Name", ', '), 'None') AS staff_positions
+                COALESCE(string_agg(DISTINCT sp."Name", ', '), 'None') AS staff_positions,
+                COALESCE(BOOL_OR(sp."LeadershipPosition"), FALSE) AS is_leadership
             FROM "User" u
             LEFT JOIN "UserStaffPosition" usp ON usp."UserId" = u."Id"
             LEFT JOIN "StaffPosition" sp ON sp."Id" = usp."StaffPositionId"
@@ -516,6 +517,7 @@ class StaffNinjaGroup(app_commands.Group):
             f"- preferred name: {preferred_full_name}",
             f"- discord mapping: {row['discord_value'] or '(none)'}",
             f"- status: {status_label}",
+            f"- leadership: {'yes' if row['is_leadership'] else 'no'}",
             f"- staff positions: {row['staff_positions']}",
             f"- email: {email}",
             f"- phone: {phone}",
