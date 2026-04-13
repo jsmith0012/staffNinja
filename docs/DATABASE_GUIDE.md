@@ -28,6 +28,33 @@ INSERT INTO staffninja_jobs (job_type, payload, created_by, max_retries)
 VALUES ($1, $2::jsonb, $3, $4)
 ```
 
+## Key Shared Tables (read-only)
+The database is shared with other Nebraskon services. The bot reads from existing tables:
+- **"User"**: Staff members. Columns include "Discord" (Discord ID), "Status" (1=active), "Email".
+- **"StaffPosition"**: Position definitions with "LeadershipPosition" (boolean), "DepartmentId", "ParentStaffPositionId".
+- **"UserStaffPosition"**: Many-to-many join linking users to positions.
+- **"Event"**: Event data (name, start, end).
+- **"CompletedForm"**: Staff agreement tracking.
+- **"Document"**: Policy documents with category, subcategory, and content.
+
+## Active Staff Counting
+Active staff is counted by requiring both User.Status=1 AND at least one position in UserStaffPosition:
+```sql
+SELECT COUNT(DISTINCT u."Id")
+FROM "User" u
+INNER JOIN "UserStaffPosition" usp ON u."Id" = usp."UserId"
+WHERE u."Status" = 1
+```
+
+## Leadership Query
+Use `BOOL_OR(sp."LeadershipPosition")` across a user's positions to determine if they hold any leadership role:
+```sql
+SELECT BOOL_OR(sp."LeadershipPosition") AS is_leader
+FROM "UserStaffPosition" usp
+JOIN "StaffPosition" sp ON usp."StaffPositionId" = sp."Id"
+WHERE usp."UserId" = $1
+```
+
 ## Environment Keys
 - POSTGRES_HOST
 - POSTGRES_PORT

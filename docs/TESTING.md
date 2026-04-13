@@ -30,3 +30,22 @@ Remote task labels are defined in .vscode/tasks.json and should be kept in sync 
 - Prefer small deterministic tests.
 - Mock external provider boundaries (Discord/AI/network) as needed.
 - Keep contract tests for DB and queue behavior current when schema/logic changes.
+
+## External API Mocking
+When testing code that calls external services (e.g. Google Groups), mock at the service boundary:
+```python
+# tests/test_mailing_lists.py pattern
+@patch("services.google_groups_service.get_user_groups", new_callable=AsyncMock)
+@patch("services.google_groups_service.get_allowed_groups")
+async def test_mailinglist_view(mock_allowed, mock_user_groups):
+    mock_allowed.return_value = ["staff@example.com"]
+    mock_user_groups.return_value = [{"email": "staff@example.com", "name": "Staff"}]
+    # ... test logic
+```
+
+## Test Files
+- tests/test_job_queue.py: job queue operations and claim logic.
+- tests/test_db_contract.py: database connectivity and query patterns.
+- tests/test_reminders.py: reminder service behavior.
+- tests/test_staff_status.py: staff status lookups.
+- tests/test_mailing_lists.py: mailing list views, Google API mocking, leadership filtering.

@@ -10,7 +10,8 @@ This repository is the source of truth for cross-PC Copilot context. Keep this f
 ## Quick Map
 - Entry point: bot/main.py
 - Cogs: bot/cogs/
-- Services: services/
+- Utility modules: bot/cogs/mailing_lists.py (not a cog — provides mailing list helpers/Views)
+- Services: services/ (includes google_groups_service.py for Google Groups API)
 - Database: db/
 - Jobs: jobs/
 - Config: config/settings.py
