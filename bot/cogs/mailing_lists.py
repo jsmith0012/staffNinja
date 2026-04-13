@@ -9,6 +9,29 @@ from utils.errors import GoogleGroupsError
 logger = logging.getLogger(__name__)
 
 
+async def _is_leadership(discord_user: discord.User | discord.Member) -> bool:
+    """Check if a Discord user holds any leadership staff position."""
+    user_id = str(discord_user.id)
+    candidates = {user_id, user_id.lower()}
+    for attr in ("name", "global_name", "display_name"):
+        val = str(getattr(discord_user, attr, "") or "").strip().lower()
+        if val:
+            candidates.add(val)
+            candidates.add(val.lstrip("@"))
+
+    rows = await Database.fetch(
+        """
+        SELECT COALESCE(BOOL_OR(sp."LeadershipPosition"), FALSE) AS is_leadership
+        FROM "User" u
+        INNER JOIN "UserStaffPosition" usp ON usp."UserId" = u."Id"
+        INNER JOIN "StaffPosition" sp ON sp."Id" = usp."StaffPositionId"
+        WHERE LOWER(TRIM(BOTH '@' FROM COALESCE(u."Discord", ''))) = ANY($1::text[])
+        """,
+        list(candidates),
+    )
+    return bool(rows and rows[0]["is_leadership"])
+
+
 async def _get_user_email(discord_user: discord.User | discord.Member) -> str | None:
     """Look up the linked email for a Discord user from the User table."""
     user_id = str(discord_user.id)

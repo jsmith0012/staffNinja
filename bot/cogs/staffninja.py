@@ -21,7 +21,7 @@ from services.document_search_service import (
     search_documents as _svc_search_documents,
 )
 from services import google_groups_service
-from bot.cogs.mailing_lists import _get_user_email, _build_embed, MailingListView
+from bot.cogs.mailing_lists import _get_user_email, _is_leadership, _build_embed, MailingListView
 from utils.errors import GoogleGroupsError
 
 settings = get_settings()
@@ -560,6 +560,13 @@ class StaffNinjaGroup(app_commands.Group):
                 ephemeral=True,
             )
             return
+
+        # Hide leadership-only mailing list from non-leaders
+        leadership_group = (settings.MAILINGLIST_LEADERSHIP_GROUP or "").strip().lower()
+        if leadership_group:
+            is_leader = await _is_leadership(interaction.user)
+            if not is_leader:
+                groups = [g for g in groups if g["email"] != leadership_group]
 
         embed = _build_embed(groups)
         view = MailingListView(invoker_id=interaction.user.id, user_email=email, groups=groups)

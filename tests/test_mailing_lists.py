@@ -207,3 +207,56 @@ async def test_get_user_email_not_linked(mock_db):
 
     result = await _get_user_email(user)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Cog helper: _is_leadership
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@patch("bot.cogs.mailing_lists.Database")
+async def test_is_leadership_true(mock_db):
+    from bot.cogs.mailing_lists import _is_leadership
+
+    mock_db.fetch = AsyncMock(return_value=[{"is_leadership": True}])
+    user = MagicMock()
+    user.id = 123456789
+    user.name = "leaderuser"
+    user.global_name = "LeaderUser"
+    user.display_name = "LeaderUser"
+
+    result = await _is_leadership(user)
+    assert result is True
+    mock_db.fetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("bot.cogs.mailing_lists.Database")
+async def test_is_leadership_false(mock_db):
+    from bot.cogs.mailing_lists import _is_leadership
+
+    mock_db.fetch = AsyncMock(return_value=[{"is_leadership": False}])
+    user = MagicMock()
+    user.id = 123456789
+    user.name = "regularuser"
+    user.global_name = "RegularUser"
+    user.display_name = "RegularUser"
+
+    result = await _is_leadership(user)
+    assert result is False
+
+
+@pytest.mark.asyncio
+@patch("bot.cogs.mailing_lists.Database")
+async def test_is_leadership_no_record(mock_db):
+    from bot.cogs.mailing_lists import _is_leadership
+
+    mock_db.fetch = AsyncMock(return_value=[])
+    user = MagicMock()
+    user.id = 999999999
+    user.name = "unknown"
+    user.global_name = None
+    user.display_name = "unknown"
+
+    result = await _is_leadership(user)
+    assert result is False
