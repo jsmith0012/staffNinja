@@ -14,6 +14,7 @@ from discord.ext import commands
 from ai.provider import get_provider
 from config.settings import get_settings
 from db.connection import Database
+from jobs.anime_quotes import random_wait_message
 from services.document_search_service import (
     extract_query_terms as _svc_extract_query_terms,
     build_search_query as _svc_build_search_query,
@@ -32,6 +33,20 @@ class StaffNinjaGroup(app_commands.Group):
 
     def __init__(self):
         super().__init__(name="staffninja", description="staffNinja bot commands")
+
+    async def _begin_slash_response(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.edit_original_response(content=random_wait_message())
+
+    async def _finish_slash_response(
+        self,
+        interaction: discord.Interaction,
+        *,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
+    ) -> None:
+        await interaction.edit_original_response(content=content, embed=embed, view=view)
 
     @staticmethod
     def _format_event_timestamp(value):
@@ -77,6 +92,8 @@ class StaffNinjaGroup(app_commands.Group):
 
     @app_commands.command(name="server", description="Show private bot/server health status")
     async def server(self, interaction: discord.Interaction):
+        await self._begin_slash_response(interaction)
+
         db_status = "unknown"
         db_latency_ms = "n/a"
 
@@ -103,10 +120,12 @@ class StaffNinjaGroup(app_commands.Group):
             f"- checked at: {datetime.now(timezone.utc).isoformat()}",
         ]
 
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await self._finish_slash_response(interaction, content="\n".join(lines))
 
     @app_commands.command(name="jobs", description="Show job queue status and recent failures")
     async def jobs(self, interaction: discord.Interaction):
+        await self._begin_slash_response(interaction)
+
         from jobs.queue import job_counts, recent_failed
         from jobs.handlers import registered_types
 
@@ -131,10 +150,12 @@ class StaffNinjaGroup(app_commands.Group):
                 ts = j.completed_at.strftime("%m-%d %H:%M") if j.completed_at else "?"
                 lines.append(f"  `#{j.id}` {j.job_type} ({ts}) — {err_preview}")
 
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await self._finish_slash_response(interaction, content="\n".join(lines))
 
     @app_commands.command(name="help", description="Show available slash commands")
     async def help(self, interaction: discord.Interaction):
+        await self._begin_slash_response(interaction)
+
         lines = [
             "staffNinja slash command help",
             "- /staffninja server: private health report for bot/server/db status",
@@ -142,14 +163,16 @@ class StaffNinjaGroup(app_commands.Group):
             "- /staffninja status: your staff profile/status from the User table",
             "- /staffninja event: active event status and related metrics",
             "- /staffninja jobs: job queue status and recent failures",
-            "- /eventninja policy <question>: answers from Document table excerpts only",
+            "- /staffninja policy <question>: answers from Document table excerpts only",
             "- /staffninja link email:<you@example.com>: sends a verification code to your email",
             "- /staffninja verify code:<123456>: verifies code and links your Discord account",
         ]
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await self._finish_slash_response(interaction, content="\n".join(lines))
 
     @app_commands.command(name="event", description="Show event status and related metrics")
     async def event(self, interaction: discord.Interaction):
+        await self._begin_slash_response(interaction)
+
         status_map = {
             0: "inactive",
             1: "active",
@@ -161,16 +184,16 @@ class StaffNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Failed event lookup")
-            await interaction.response.send_message(
-                f"Event lookup failed: {exc.__class__.__name__}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Event lookup failed: {exc.__class__.__name__}",
             )
             return
 
         if not event_rows:
-            await interaction.response.send_message(
-                "No active event found (Status = 1).",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="No active event found (Status = 1).",
             )
             return
 
@@ -203,9 +226,9 @@ class StaffNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Failed event metrics lookup event_id=%s", selected_event_id)
-            await interaction.response.send_message(
-                f"Event metrics lookup failed: {exc.__class__.__name__}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Event metrics lookup failed: {exc.__class__.__name__}",
             )
             return
 
@@ -230,21 +253,20 @@ class StaffNinjaGroup(app_commands.Group):
             f"  expense budgets={metric['expense_budgets']}, legacy badges={metric['legacy_badges']}, staff events={metric['staff_events']}",
             f"  volunteer awards={metric['volunteer_awards']}, volunteer hours={metric['volunteer_hours']}, volunteer rewards={metric['volunteer_rewards']}",
         ]
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await self._finish_slash_response(interaction, content="\n".join(lines))
 
     @app_commands.command(name="link", description="Link your Discord account to your staff record by email")
     @app_commands.describe(email="Email address on your staff record")
     async def link(self, interaction: discord.Interaction, email: str):
+        await self._begin_slash_response(interaction)
+
         normalized_email = (email or "").strip().lower()
         if not normalized_email or "@" not in normalized_email:
-            await interaction.response.send_message(
-                "Please provide a valid email address.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="Please provide a valid email address.",
             )
             return
-
-        # Defer immediately before any I/O — DB lookup + SMTP can exceed Discord's 3s window
-        await interaction.response.defer(ephemeral=True)
 
         try:
             matches = await Database.fetch(
@@ -253,23 +275,23 @@ class StaffNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Failed email lookup for link command user_id=%s", getattr(interaction.user, "id", None))
-            await interaction.followup.send(
-                f"Account lookup failed: {exc.__class__.__name__}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Account lookup failed: {exc.__class__.__name__}",
             )
             return
 
         if not matches:
-            await interaction.followup.send(
-                "No matching account could be verified for that email.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="No matching account could be verified for that email.",
             )
             return
 
         if len(matches) > 1:
-            await interaction.followup.send(
-                "Multiple accounts matched that email. Please contact an admin.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="Multiple accounts matched that email. Please contact an admin.",
             )
             return
 
@@ -280,15 +302,18 @@ class StaffNinjaGroup(app_commands.Group):
         if existing_discord:
             normalized_existing = existing_discord.lstrip("@").lower()
             if normalized_existing == requestor_id.lower():
-                await interaction.followup.send(
-                    "Your Discord account is already linked.",
-                    ephemeral=True,
+                await self._finish_slash_response(
+                    interaction,
+                    content="Your Discord account is already linked.",
                 )
                 return
 
-            await interaction.followup.send(
-                "This account is already linked to a Discord identity. Please contact an admin to re-link.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=(
+                    "This account is already linked to a Discord identity. "
+                    "Please contact an admin to re-link."
+                ),
             )
             return
 
@@ -301,9 +326,9 @@ class StaffNinjaGroup(app_commands.Group):
             await loop.run_in_executor(None, self._send_verification_email, normalized_email, code)
         except Exception as exc:
             logging.exception("Failed to send link verification email user_id=%s", getattr(interaction.user, "id", None))
-            await interaction.followup.send(
-                f"Could not send verification email: {exc.__class__.__name__}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Could not send verification email: {exc.__class__.__name__}",
             )
             return
 
@@ -315,30 +340,32 @@ class StaffNinjaGroup(app_commands.Group):
             "attempts": 0,
         }
 
-        await interaction.followup.send(
-            "Verification code sent. Run `/staffninja verify code:<123456>` to complete linking.",
-            ephemeral=True,
+        await self._finish_slash_response(
+            interaction,
+            content="Verification code sent. Run `/staffninja verify code:<123456>` to complete linking.",
         )
 
     @app_commands.command(name="verify", description="Verify your email code and complete account linking")
     @app_commands.describe(code="6-digit code sent to your email")
     async def verify(self, interaction: discord.Interaction, code: str):
+        await self._begin_slash_response(interaction)
+
         user_id = int(interaction.user.id)
         requestor_id = str(interaction.user.id)
         pending = self.pending_link_challenges.get(user_id)
 
         if not pending:
-            await interaction.response.send_message(
-                "No pending link request found. Run `/staffninja link` first.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="No pending link request found. Run `/staffninja link` first.",
             )
             return
 
         if datetime.now(timezone.utc).timestamp() > pending["expires_at"]:
             self.pending_link_challenges.pop(user_id, None)
-            await interaction.response.send_message(
-                "Verification code expired. Run `/staffninja link` again.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="Verification code expired. Run `/staffninja link` again.",
             )
             return
 
@@ -348,15 +375,15 @@ class StaffNinjaGroup(app_commands.Group):
             remaining = settings.LINK_CODE_MAX_ATTEMPTS - pending["attempts"]
             if remaining <= 0:
                 self.pending_link_challenges.pop(user_id, None)
-                await interaction.response.send_message(
-                    "Too many invalid attempts. Run `/staffninja link` again.",
-                    ephemeral=True,
+                await self._finish_slash_response(
+                    interaction,
+                    content="Too many invalid attempts. Run `/staffninja link` again.",
                 )
                 return
 
-            await interaction.response.send_message(
-                f"Invalid code. {remaining} attempts remaining.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Invalid code. {remaining} attempts remaining.",
             )
             return
 
@@ -368,29 +395,31 @@ class StaffNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Failed to update Discord link for user_id=%s", getattr(interaction.user, "id", None))
-            await interaction.response.send_message(
-                f"Could not update your profile: {exc.__class__.__name__}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Could not update your profile: {exc.__class__.__name__}",
             )
             return
 
         if result != "UPDATE 1":
             self.pending_link_challenges.pop(user_id, None)
-            await interaction.response.send_message(
-                "Could not complete link because the account was updated. Please contact an admin.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="Could not complete link because the account was updated. Please contact an admin.",
             )
             return
 
         self.pending_link_challenges.pop(user_id, None)
 
-        await interaction.response.send_message(
-            "Your Discord account has been linked successfully. You can now run `/staffninja staff`.",
-            ephemeral=True,
+        await self._finish_slash_response(
+            interaction,
+            content="Your Discord account has been linked successfully. You can now run `/staffninja status`.",
         )
 
     @app_commands.command(name="status", description="Show your staff profile and status")
     async def staff(self, interaction: discord.Interaction):
+        await self._begin_slash_response(interaction)
+
         user = interaction.user
         handle_candidates = {
             str(user.id).strip().lower(),
@@ -429,16 +458,19 @@ class StaffNinjaGroup(app_commands.Group):
             rows = await Database.fetch(query, list(handle_candidates))
         except Exception as exc:
             logging.exception("Failed staff lookup for user_id=%s", getattr(user, "id", None))
-            await interaction.response.send_message(
-                f"Staff lookup failed: {exc.__class__.__name__}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Staff lookup failed: {exc.__class__.__name__}",
             )
             return
 
         if not rows:
-            await interaction.response.send_message(
-                "No staff record matched your Discord identity. Run `/staffninja link email:<you@example.com>` to link your account.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=(
+                    "No staff record matched your Discord identity. "
+                    "Run `/staffninja link email:<you@example.com>` to link your account."
+                ),
             )
             return
 
@@ -487,9 +519,9 @@ class StaffNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Failed staff agreement lookup for user_id=%s", row["user_id"])
-            await interaction.response.send_message(
-                f"Staff agreement lookup failed: {exc.__class__.__name__}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Staff agreement lookup failed: {exc.__class__.__name__}",
             )
             return
 
@@ -526,38 +558,40 @@ class StaffNinjaGroup(app_commands.Group):
             f"- year joined: {year_joined}",
             f"- staff agreement: {staff_agreement_status}",
         ]
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await self._finish_slash_response(interaction, content="\n".join(lines))
 
 
     # ---- mailing list command ----
 
     @app_commands.command(name="mailinglist", description="View and manage your mailing list subscriptions")
     async def mailinglist(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._begin_slash_response(interaction)
 
         email = await _get_user_email(interaction.user)
         if not email:
-            await interaction.followup.send(
-                "Your Discord account is not linked to a staff record. "
-                "Use `/staffninja link` to connect your account first.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=(
+                    "Your Discord account is not linked to a staff record. "
+                    "Use `/staffninja link` to connect your account first."
+                ),
             )
             return
 
         allowed = google_groups_service.get_allowed_groups()
         if not allowed:
-            await interaction.followup.send(
-                "No mailing lists are configured. Contact an admin.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="No mailing lists are configured. Contact an admin.",
             )
             return
 
         try:
             groups = await google_groups_service.get_user_groups(email)
         except GoogleGroupsError as exc:
-            await interaction.followup.send(
-                f"Failed to retrieve mailing lists: {exc}",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content=f"Failed to retrieve mailing lists: {exc}",
             )
             return
 
@@ -570,7 +604,7 @@ class StaffNinjaGroup(app_commands.Group):
 
         embed = _build_embed(groups)
         view = MailingListView(invoker_id=interaction.user.id, user_email=email, groups=groups)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await self._finish_slash_response(interaction, content=None, embed=embed, view=view)
 
     # ---- policy command (formerly /eventninja policy) ----
 
@@ -633,6 +667,8 @@ class StaffNinjaGroup(app_commands.Group):
     @app_commands.command(name="policy", description="Answer policy questions from Document table content")
     @app_commands.describe(question="Policy question to answer from documents")
     async def policy(self, interaction: discord.Interaction, question: str):
+        await self._begin_slash_response(interaction)
+
         clean_question = (question or "").strip()
         search_query = self._build_policy_search_query(clean_question)
         question_terms = self._extract_query_terms(clean_question)
@@ -655,9 +691,9 @@ class StaffNinjaGroup(app_commands.Group):
                 guild_id,
                 channel_id,
             )
-            await interaction.response.send_message(
-                "Please provide a policy question.",
-                ephemeral=True,
+            await self._finish_slash_response(
+                interaction,
+                content="Please provide a policy question.",
             )
             return
 
@@ -672,17 +708,11 @@ class StaffNinjaGroup(app_commands.Group):
                     user_id,
                     provider_name,
                 )
-                await interaction.response.send_message(
-                    f"AI provider '{provider_name}' is not registered.",
-                    ephemeral=True,
+                await self._finish_slash_response(
+                    interaction,
+                    content=f"AI provider '{provider_name}' is not registered.",
                 )
                 return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        async def _send_ephemeral(content: str):
-            # After defer, all replies must go through followup to avoid interaction timeout failures.
-            await interaction.followup.send(content, ephemeral=True)
 
         logging.debug(
             "Policy search initialized: user_id=%s provider=%s search_query=%s",
@@ -741,8 +771,9 @@ class StaffNinjaGroup(app_commands.Group):
             )
         except Exception as exc:
             logging.exception("Policy document lookup failed")
-            await _send_ephemeral(
-                f"Document lookup failed: {exc.__class__.__name__}",
+            await self._finish_slash_response(
+                interaction,
+                content=f"Document lookup failed: {exc.__class__.__name__}",
             )
             return
 
@@ -778,8 +809,9 @@ class StaffNinjaGroup(app_commands.Group):
                     )
                 except Exception as exc:
                     logging.exception("Policy document fallback lookup failed")
-                    await _send_ephemeral(
-                        f"Document lookup failed: {exc.__class__.__name__}",
+                    await self._finish_slash_response(
+                        interaction,
+                        content=f"Document lookup failed: {exc.__class__.__name__}",
                     )
                     return
 
@@ -791,8 +823,9 @@ class StaffNinjaGroup(app_commands.Group):
                 used_fallback,
                 like_terms,
             )
-            await _send_ephemeral(
-                "I can only answer from the Document table and found no matching policy text.",
+            await self._finish_slash_response(
+                interaction,
+                content="I can only answer from the Document table and found no matching policy text.",
             )
             return
 
@@ -840,8 +873,9 @@ class StaffNinjaGroup(app_commands.Group):
                     docs_with_text.append(merged)
             except Exception as exc:
                 logging.exception("Policy deep document lookup failed")
-                await _send_ephemeral(
-                    f"Document lookup failed: {exc.__class__.__name__}",
+                await self._finish_slash_response(
+                    interaction,
+                    content=f"Document lookup failed: {exc.__class__.__name__}",
                 )
                 return
 
@@ -853,8 +887,9 @@ class StaffNinjaGroup(app_commands.Group):
                 used_fallback,
                 like_terms,
             )
-            await _send_ephemeral(
-                "I can only answer from the Document table and found no matching policy text.",
+            await self._finish_slash_response(
+                interaction,
+                content="I can only answer from the Document table and found no matching policy text.",
             )
             return
 
@@ -963,15 +998,19 @@ class StaffNinjaGroup(app_commands.Group):
                     user_id,
                     int(getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 120)),
                 )
-                await _send_ephemeral(
-                    "That request took too long (the model may be loading or under heavy use). "
-                    "Please try again in a moment."
+                await self._finish_slash_response(
+                    interaction,
+                    content=(
+                        "That request took too long (the model may be loading or under heavy use). "
+                        "Please try again in a moment."
+                    ),
                 )
                 return
             except Exception as exc:
                 logging.exception("Policy AI completion failed")
-                await _send_ephemeral(
-                    f"AI policy response failed: {exc.__class__.__name__}",
+                await self._finish_slash_response(
+                    interaction,
+                    content=f"AI policy response failed: {exc.__class__.__name__}",
                 )
                 return
 
@@ -1033,7 +1072,7 @@ class StaffNinjaGroup(app_commands.Group):
             safe_question,
             safe_answer,
         )
-        await _send_ephemeral("\n".join(lines))
+        await self._finish_slash_response(interaction, content="\n".join(lines))
 
 
 class StaffNinjaCog(commands.Cog):
