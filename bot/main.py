@@ -327,9 +327,58 @@ async def load_cogs():
             logging.error(f"Failed to load cog {cog}: {e}")
 
 
+def _remove_disabled_commands():
+    """Remove commands listed in DISABLED_COMMANDS from the command tree before syncing."""
+    disabled_str = getattr(settings, "DISABLED_COMMANDS", "") or ""
+    if not disabled_str.strip():
+        return
+    
+    # Parse comma-separated command names, normalize to lowercase
+    disabled_names = {name.strip().lower() for name in disabled_str.split(",") if name.strip()}
+    if not disabled_names:
+        return
+    
+    # Find the staffninja group in the command tree
+    staffninja_group = None
+    for cmd in bot.tree.get_commands():
+        if isinstance(cmd, discord.app_commands.Group) and cmd.name == "staffninja":
+            staffninja_group = cmd
+            break
+    
+    if not staffninja_group:
+        logging.warning("Could not find staffninja command group to disable commands")
+        return
+    
+    # Remove disabled commands from the group
+    removed = []
+    for cmd_name in list(disabled_names):
+        # Get all commands from the group
+        group_commands = {c.name.lower(): c for c in staffninja_group.commands}
+        
+        if cmd_name in group_commands:
+            try:
+                staffninja_group.remove_command(cmd_name)
+                removed.append(cmd_name)
+                logging.debug("Removed command from tree: %s", cmd_name)
+            except Exception as exc:
+                logging.warning("Failed to remove command %s: %s", cmd_name, exc)
+        else:
+            logging.warning(
+                "Command '%s' in DISABLED_COMMANDS not found in staffninja group (available: %s)",
+                cmd_name,
+                ", ".join(sorted(group_commands.keys()))
+            )
+    
+    if removed:
+        logging.info("Disabled commands: %s", ", ".join(sorted(removed)))
+
+
 async def sync_app_commands(reason: str):
     async with sync_lock:
         try:
+            # Remove disabled commands before syncing
+            _remove_disabled_commands()
+            
             guild = discord.Object(id=ALLOWED_GUILD_ID)
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)

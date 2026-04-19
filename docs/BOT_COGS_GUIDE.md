@@ -48,6 +48,17 @@ All commands are under the `/staffninja` group (defined in bot/cogs/staffninja.p
 - `/staffninja mailinglist` — view/manage mailing list subscriptions (interactive View)
 - `/staffninja policy` — search policy documents (uses db_search or AI provider)
 
+### Disabling Commands
+You can disable specific slash commands by setting the `DISABLED_COMMANDS` environment variable in `.env`:
+```bash
+# Disable one or more commands (comma-separated, case-insensitive)
+DISABLED_COMMANDS="policy,mailinglist"
+```
+
+Disabled commands will not appear in Discord's slash command autocomplete after the bot restarts and syncs commands. To re-enable commands, remove them from the list or clear the variable entirely.
+
+Available command names: `server`, `help`, `jobs`, `event`, `link`, `verify`, `status`, `mailinglist`, `policy`
+
 ## Utility Modules
 - **bot/cogs/mailing_lists.py**: NOT a cog. Provides `_get_user_email()`, `_is_leadership()`, `MailingListView`, and `_build_embed()`. Imported by staffninja.py.
 

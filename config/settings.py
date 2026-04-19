@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     MAILINGLIST_GROUPS: str = ""
     MAILINGLIST_PROTECTED_GROUPS: str = ""
     MAILINGLIST_LEADERSHIP_GROUP: str = ""
+    DISABLED_COMMANDS: str = ""
 
 def get_settings() -> Settings:
     return Settings()
