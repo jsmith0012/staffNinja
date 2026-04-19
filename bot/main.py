@@ -13,7 +13,7 @@ settings = get_settings()
 setup_logging(settings.LOG_LEVEL)
 ALLOWED_GUILD_ID = int(settings.DISCORD_GUILD_ID)
 COMMAND_RESYNC_MINUTES = max(1, int(getattr(settings, "COMMAND_RESYNC_MINUTES", 30)))
-DEBUG_LOG_ENABLED = str(getattr(settings, "LOG_LEVEL", "INFO")).upper() == "DEBUG"
+DEBUG_LOG_ENABLED = settings.DEBUG_LOG_TO_DISCORD
 DEBUG_LOG_CHANNEL_NAME = "debug_log"
 DEBUG_LOG_MESSAGE_LIMIT = 1800
 DEBUG_LOG_QUEUE_MAXSIZE = 1000

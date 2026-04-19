@@ -34,3 +34,10 @@ If SSH auth is not key-based, remote tasks may block waiting for password prompt
 ## Environment Notes
 - Keep secrets only in .env, never commit real credentials.
 - Config behavior is defined in config/settings.py.
+
+### Debug Log to Discord
+- `DEBUG_LOG_TO_DISCORD=true` enables forwarding of application logs to a Discord channel named `debug_log`.
+- When enabled, the bot will create the channel if it doesn't exist (requires Manage Channels permission).
+- This is independent of `LOG_LEVEL` — you can have DEBUG logging to files without Discord forwarding.
+- Default: `false` (disabled)
+- To enable: Add `DEBUG_LOG_TO_DISCORD=true` to your `.env` file and restart the bot.

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     AI_REQUEST_TIMEOUT_SECONDS: int = 120
     AI_MAX_CONCURRENT_REQUESTS: int = 2
     LOG_LEVEL: str = "INFO"
+    DEBUG_LOG_TO_DISCORD: bool = False
     COMMAND_RESYNC_MINUTES: int = 30
     CHAT_MONITOR_ENABLED: bool = True
     CHAT_MONITOR_CHANNELS: str = ""
