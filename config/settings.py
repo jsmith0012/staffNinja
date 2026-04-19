@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     MAILINGLIST_PROTECTED_GROUPS: str = ""
     MAILINGLIST_LEADERSHIP_GROUP: str = ""
     DISABLED_COMMANDS: str = ""
+    DB_BACKUP_ENABLED: bool = True
+    DB_BACKUP_DIR: str = "/home/jsmith/staffNinja/backups"
+    DB_BACKUP_HOUR: int = 3
 
 def get_settings() -> Settings:
     return Settings()

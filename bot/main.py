@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import timedelta
 import discord
 from discord.ext import commands
 from config.settings import get_settings
@@ -417,13 +418,46 @@ async def on_ready():
 
     # Start job worker
     if job_scheduler is None:
-        from jobs.queue import reap_stale_jobs
+        from jobs.queue import reap_stale_jobs, enqueue
         job_scheduler = Scheduler(poll_interval=settings.JOB_WORKER_POLL_SECONDS)
 
         async def _reap():
             await reap_stale_jobs(settings.JOB_STALE_TIMEOUT_SECONDS)
 
         job_scheduler.add_periodic(_reap, max(60.0, settings.JOB_STALE_TIMEOUT_SECONDS / 2))
+        
+        # Schedule daily database backup if enabled
+        if settings.DB_BACKUP_ENABLED:
+            async def _daily_backup():
+                try:
+                    await enqueue("database_backup", {}, created_by=None)
+                    logging.info("Daily database backup job enqueued")
+                except Exception as e:
+                    logging.error("Failed to enqueue database backup: %s", e)
+            
+            # Calculate seconds until next occurrence of target hour
+            now = discord.utils.utcnow()
+            target_hour = settings.DB_BACKUP_HOUR
+            next_backup = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+            if next_backup <= now:
+                next_backup = next_backup + timedelta(days=1)
+            
+            delay_seconds = (next_backup - now).total_seconds()
+            
+            # Schedule first backup after delay, then every 24 hours
+            async def _backup_with_delay():
+                await asyncio.sleep(delay_seconds)
+                while not bot.is_closed():
+                    await _daily_backup()
+                    await asyncio.sleep(86400)  # 24 hours
+            
+            asyncio.create_task(_backup_with_delay())
+            logging.info(
+                "Scheduled daily database backup at %02d:00 UTC (next backup in %.1f hours)",
+                target_hour,
+                delay_seconds / 3600
+            )
+        
         await job_scheduler.start()
         logging.info("Job queue scheduler started")
 
