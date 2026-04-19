@@ -163,50 +163,82 @@ async def handle_database_backup(payload: dict[str, Any]) -> dict[str, Any]:
     
     try:
         # Run pg_dump and pipe to gzip
-        with open(backup_path, "wb") as out_file:
-            # Start pg_dump process
-            pg_dump = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env
-            )
-            
-            # Start gzip process
-            gzip_proc = await asyncio.create_subprocess_exec(
-                "gzip",
-                stdin=pg_dump.stdout,
-                stdout=out_file,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            # Wait for both processes to complete
-            pg_stderr = await pg_dump.stderr.read()
-            gzip_stderr = await gzip_proc.stderr.read()
-            
-            pg_returncode = await pg_dump.wait()
-            gzip_returncode = await gzip_proc.wait()
-            
-            if pg_returncode != 0:
-                error_msg = pg_stderr.decode("utf-8", errors="replace")
-                logger.error("pg_dump failed (exit %d): %s", pg_returncode, error_msg)
-                # Clean up partial backup file
-                if backup_path.exists():
-                    backup_path.unlink()
-                return {
-                    "success": False,
-                    "error": f"pg_dump failed: {error_msg[:200]}"
-                }
-            
-            if gzip_returncode != 0:
-                error_msg = gzip_stderr.decode("utf-8", errors="replace")
-                logger.error("gzip failed (exit %d): %s", gzip_returncode, error_msg)
-                if backup_path.exists():
-                    backup_path.unlink()
-                return {
-                    "success": False,
-                    "error": f"gzip failed: {error_msg[:200]}"
-                }
+        # Start pg_dump process
+        pg_dump = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env
+        )
+        
+        # Start gzip process
+        gzip_proc = await asyncio.create_subprocess_exec(
+            "gzip",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Pipe data from pg_dump to gzip to file
+        async def pipe_to_gzip():
+            """Read from pg_dump and write to gzip."""
+            try:
+                while True:
+                    chunk = await pg_dump.stdout.read(65536)  # 64KB chunks
+                    if not chunk:
+                        break
+                    gzip_proc.stdin.write(chunk)
+                    await gzip_proc.stdin.drain()
+                gzip_proc.stdin.close()
+                await gzip_proc.stdin.wait_closed()
+            except Exception as e:
+                logger.error("Error piping data to gzip: %s", e)
+        
+        async def write_to_file():
+            """Read from gzip and write to file."""
+            try:
+                with open(backup_path, "wb") as out_file:
+                    while True:
+                        chunk = await gzip_proc.stdout.read(65536)  # 64KB chunks
+                        if not chunk:
+                            break
+                        out_file.write(chunk)
+            except Exception as e:
+                logger.error("Error writing to file: %s", e)
+        
+        # Run piping tasks concurrently
+        pipe_task = asyncio.create_task(pipe_to_gzip())
+        write_task = asyncio.create_task(write_to_file())
+        
+        # Wait for both tasks and processes to complete
+        await asyncio.gather(pipe_task, write_task)
+        
+        pg_stderr = await pg_dump.stderr.read()
+        gzip_stderr = await gzip_proc.stderr.read()
+        
+        pg_returncode = await pg_dump.wait()
+        gzip_returncode = await gzip_proc.wait()
+        
+        if pg_returncode != 0:
+            error_msg = pg_stderr.decode("utf-8", errors="replace")
+            logger.error("pg_dump failed (exit %d): %s", pg_returncode, error_msg)
+            # Clean up partial backup file
+            if backup_path.exists():
+                backup_path.unlink()
+            return {
+                "success": False,
+                "error": f"pg_dump failed: {error_msg[:200]}"
+            }
+        
+        if gzip_returncode != 0:
+            error_msg = gzip_stderr.decode("utf-8", errors="replace")
+            logger.error("gzip failed (exit %d): %s", gzip_returncode, error_msg)
+            if backup_path.exists():
+                backup_path.unlink()
+            return {
+                "success": False,
+                "error": f"gzip failed: {error_msg[:200]}"
+            }
         
         # Get backup file size
         size_bytes = backup_path.stat().st_size
