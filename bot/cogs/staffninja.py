@@ -1049,8 +1049,8 @@ class StaffNinjaGroup(app_commands.Group):
             template_header,
             template_question,
             f"- relevant policies:\n{safe_answer}",
-            template_scan,
-            template_sources,
+            #template_scan,
+            #template_sources,
         ]
         combined = "\n".join(lines)
         if len(combined) > 1900:
