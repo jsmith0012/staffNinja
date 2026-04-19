@@ -177,11 +177,11 @@ async def test_add_member_calls_api(mock_build, mock_settings):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-@patch("bot.cogs.mailing_lists.Database")
+@patch("db.queries.get_user_email_by_discord")
 async def test_get_user_email_found(mock_db):
     from bot.cogs.mailing_lists import _get_user_email
 
-    mock_db.fetch = AsyncMock(return_value=[{"email": "staff@example.com"}])
+    mock_db.return_value = "staff@example.com"
     user = MagicMock()
     user.id = 123456789
     user.name = "testuser"
@@ -190,15 +190,15 @@ async def test_get_user_email_found(mock_db):
 
     result = await _get_user_email(user)
     assert result == "staff@example.com"
-    mock_db.fetch.assert_called_once()
+    mock_db.assert_called_once()
 
 
 @pytest.mark.asyncio
-@patch("bot.cogs.mailing_lists.Database")
+@patch("db.queries.get_user_email_by_discord")
 async def test_get_user_email_not_linked(mock_db):
     from bot.cogs.mailing_lists import _get_user_email
 
-    mock_db.fetch = AsyncMock(return_value=[])
+    mock_db.return_value = None
     user = MagicMock()
     user.id = 123456789
     user.name = "testuser"
@@ -214,11 +214,11 @@ async def test_get_user_email_not_linked(mock_db):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-@patch("bot.cogs.mailing_lists.Database")
+@patch("db.queries.is_leadership_user")
 async def test_is_leadership_true(mock_db):
     from bot.cogs.mailing_lists import _is_leadership
 
-    mock_db.fetch = AsyncMock(return_value=[{"is_leadership": True}])
+    mock_db.return_value = True
     user = MagicMock()
     user.id = 123456789
     user.name = "leaderuser"
@@ -227,15 +227,15 @@ async def test_is_leadership_true(mock_db):
 
     result = await _is_leadership(user)
     assert result is True
-    mock_db.fetch.assert_called_once()
+    mock_db.assert_called_once()
 
 
 @pytest.mark.asyncio
-@patch("bot.cogs.mailing_lists.Database")
+@patch("db.queries.is_leadership_user")
 async def test_is_leadership_false(mock_db):
     from bot.cogs.mailing_lists import _is_leadership
 
-    mock_db.fetch = AsyncMock(return_value=[{"is_leadership": False}])
+    mock_db.return_value = False
     user = MagicMock()
     user.id = 123456789
     user.name = "regularuser"
@@ -247,11 +247,11 @@ async def test_is_leadership_false(mock_db):
 
 
 @pytest.mark.asyncio
-@patch("bot.cogs.mailing_lists.Database")
+@patch("db.queries.is_leadership_user")
 async def test_is_leadership_no_record(mock_db):
     from bot.cogs.mailing_lists import _is_leadership
 
-    mock_db.fetch = AsyncMock(return_value=[])
+    mock_db.return_value = False
     user = MagicMock()
     user.id = 999999999
     user.name = "unknown"

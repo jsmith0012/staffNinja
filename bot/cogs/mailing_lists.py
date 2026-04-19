@@ -2,7 +2,7 @@ import logging
 
 import discord
 
-from db.connection import Database
+import db.queries
 from services import google_groups_service
 from utils.errors import GoogleGroupsError
 
@@ -19,17 +19,7 @@ async def _is_leadership(discord_user: discord.User | discord.Member) -> bool:
             candidates.add(val)
             candidates.add(val.lstrip("@"))
 
-    rows = await Database.fetch(
-        """
-        SELECT COALESCE(BOOL_OR(sp."LeadershipPosition"), FALSE) AS is_leadership
-        FROM "User" u
-        INNER JOIN "UserStaffPosition" usp ON usp."UserId" = u."Id"
-        INNER JOIN "StaffPosition" sp ON sp."Id" = usp."StaffPositionId"
-        WHERE LOWER(TRIM(BOTH '@' FROM COALESCE(u."Discord", ''))) = ANY($1::text[])
-        """,
-        list(candidates),
-    )
-    return bool(rows and rows[0]["is_leadership"])
+    return await db.queries.is_leadership_user(list(candidates))
 
 
 async def _get_user_email(discord_user: discord.User | discord.Member) -> str | None:
@@ -42,18 +32,7 @@ async def _get_user_email(discord_user: discord.User | discord.Member) -> str | 
             candidates.add(val)
             candidates.add(val.lstrip("@"))
 
-    rows = await Database.fetch(
-        """
-        SELECT u."Email" AS email
-        FROM "User" u
-        WHERE LOWER(TRIM(BOTH '@' FROM COALESCE(u."Discord", ''))) = ANY($1::text[])
-        LIMIT 1
-        """,
-        list(candidates),
-    )
-    if rows:
-        return rows[0]["email"]
-    return None
+    return await db.queries.get_user_email_by_discord(list(candidates))
 
 
 class MailingListView(discord.ui.View):

@@ -4,7 +4,7 @@ Exposes standalone functions used by both the /eventninja policy slash command
 and the real-time chat monitor cog so the retrieval logic lives in one place.
 """
 import logging
-from db.connection import Database
+import db.queries
 
 
 # ---------------------------------------------------------------------------
@@ -138,37 +138,9 @@ async def search_documents(
     # ---- Stage 1: metadata ranking ----------------------------------------
     docs_by_id: dict[int, dict] = {}
 
-    category_clause = ""
-    category_args: list = []
-    if category_filter:
-        category_clause = 'AND "Category" = ANY($2::text[])'
-        category_args = [category_filter]
-
     for search_candidate in query_candidates:
         try:
-            rows = await Database.fetch(
-                f"""
-                SELECT
-                    "Id",
-                    COALESCE("Title",    '') AS title,
-                    COALESCE("Category", '') AS category,
-                    COALESCE("Version",  '') AS version,
-                    ts_rank_cd(
-                        to_tsvector(
-                            'english',
-                            COALESCE("Title", '') || ' ' ||
-                            COALESCE("Category", '') || ' ' ||
-                            COALESCE("DocumentValue", '')
-                        ),
-                        plainto_tsquery('english', $1)
-                    ) AS rank
-                FROM "Document"
-                WHERE TRUE {category_clause}
-                ORDER BY rank DESC, "EditedDate" DESC NULLS LAST
-                """,
-                search_candidate,
-                *category_args,
-            )
+            rows = await db.queries.search_documents_stage1(search_candidate, category_filter)
         except Exception:
             logging.exception("document_search_service: stage-1 lookup failed")
             continue
@@ -185,31 +157,8 @@ async def search_documents(
         tokens = score_terms
         like_terms = [f"%{t.strip()}%" for t in tokens if len(t.strip()) >= 2][:16]
         if like_terms:
-            category_clause2 = ""
-            category_args2: list = []
-            if category_filter:
-                category_clause2 = "AND \"Category\" = ANY($2::text[])"
-                category_args2 = [category_filter]
             try:
-                rows = await Database.fetch(
-                    f"""
-                    SELECT
-                        "Id",
-                        COALESCE("Title",    '') AS title,
-                        COALESCE("Category", '') AS category,
-                        COALESCE("Version",  '') AS version,
-                        0.0::float AS rank
-                    FROM "Document"
-                    WHERE (
-                        COALESCE("Title",          '') ILIKE ANY($1::text[])
-                     OR COALESCE("Category",       '') ILIKE ANY($1::text[])
-                     OR COALESCE("DocumentValue",  '') ILIKE ANY($1::text[])
-                    ) {category_clause2}
-                    ORDER BY "EditedDate" DESC NULLS LAST
-                    """,
-                    like_terms,
-                    *category_args2,
-                )
+                rows = await db.queries.search_documents_fallback(like_terms, category_filter)
                 for row in rows:
                     docs_by_id[int(row["Id"])] = row
             except Exception:
@@ -233,15 +182,7 @@ async def search_documents(
 
     # ---- Stage 2: load full text and re-rank ------------------------------
     try:
-        detailed_rows = await Database.fetch(
-            """
-            SELECT "Id", COALESCE("DocumentValue", '') AS document_value
-            FROM "Document"
-            WHERE "Id" = ANY($1::int[])
-            ORDER BY array_position($1::int[], "Id")
-            """,
-            deep_ids,
-        )
+        detailed_rows = await db.queries.search_documents_stage2(deep_ids)
     except Exception:
         logging.exception("document_search_service: stage-2 text load failed")
         return []

@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from db.connection import Database
-from jobs.models import Job, JobStatus
+from jobs.models import Job
 
 logger = logging.getLogger(__name__)
 

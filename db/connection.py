@@ -30,18 +30,19 @@ class Database:
     async def close(cls):
         if cls._pool:
             await cls._pool.close()
+            cls._pool = None
             logging.info("Database pool closed.")
 
     @classmethod
     async def fetch(cls, query, *args):
-        if not cls._pool:
+        if not cls._pool or getattr(cls._pool, "_closed", False):
             await cls.connect()
         async with cls._pool.acquire() as conn:
             return await conn.fetch(query, *args)
 
     @classmethod
     async def execute(cls, query, *args):
-        if not cls._pool:
+        if not cls._pool or getattr(cls._pool, "_closed", False):
             await cls.connect()
         async with cls._pool.acquire() as conn:
             return await conn.execute(query, *args)

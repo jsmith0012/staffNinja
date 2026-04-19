@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 from jobs.models import Job, JobStatus
 from jobs.handlers import register, get_handler, registered_types, _registry

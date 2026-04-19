@@ -4,7 +4,6 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pytest
 
 # Import the rotation function
 from jobs.builtin_handlers import _rotate_backups

@@ -1,19 +1,13 @@
 import asyncio
 import re
-import socket
-from datetime import datetime, timezone
 import logging
-import secrets
-import smtplib
-from email.message import EmailMessage
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from ai.provider import get_provider
 from config.settings import get_settings
-from db.connection import Database
+import services.staffninja_service as sns
 from jobs.anime_quotes import random_wait_message
 from services.document_search_service import (
     extract_query_terms as _svc_extract_query_terms,
@@ -48,79 +42,12 @@ class StaffNinjaGroup(app_commands.Group):
     ) -> None:
         await interaction.edit_original_response(content=content, embed=embed, view=view)
 
-    @staticmethod
-    def _format_event_timestamp(value):
-        if value is None:
-            return "(none)"
-
-        try:
-            timestamp = int(value)
-            return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        except Exception:
-            return str(value)
-
-    @staticmethod
-    def _format_db_timestamp(value):
-        if value is None:
-            return "(none)"
-
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                value = value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-        return str(value)
-
-    @staticmethod
-    def _send_verification_email(recipient_email: str, code: str):
-        if not settings.EMAIL_SMTP_USERNAME or not settings.EMAIL_SMTP_PASSWORD or not settings.EMAIL_FROM:
-            raise RuntimeError("Email delivery is not configured")
-
-        msg = EmailMessage()
-        msg["Subject"] = "staffNinja account link verification"
-        msg["From"] = settings.EMAIL_FROM
-        msg["To"] = recipient_email
-        msg.set_content(
-            "Use this verification code in Discord to link your account:\n\n"
-            f"{code}\n\n"
-            f"This code expires in {settings.LINK_CODE_TTL_MINUTES} minutes."
-        )
-
-        with smtplib.SMTP_SSL(settings.EMAIL_SMTP_HOST, settings.EMAIL_SMTP_PORT, timeout=15) as smtp:
-            smtp.login(settings.EMAIL_SMTP_USERNAME, settings.EMAIL_SMTP_PASSWORD)
-            smtp.send_message(msg)
-
     @app_commands.command(name="server", description="Show private bot/server health status")
     async def server(self, interaction: discord.Interaction):
         await self._begin_slash_response(interaction)
-
-        db_status = "unknown"
-        db_latency_ms = "n/a"
-
-        try:
-            start = datetime.now(timezone.utc)
-            rows = await Database.fetch("SELECT 1 AS ok")
-            end = datetime.now(timezone.utc)
-            ok = rows and rows[0]["ok"] == 1
-            db_status = "ok" if ok else "unexpected response"
-            db_latency_ms = str(int((end - start).total_seconds() * 1000))
-        except Exception as exc:
-            db_status = f"error: {exc.__class__.__name__}"
-
         latency_ms = int((interaction.client.latency or 0) * 1000)
-        uptime = datetime.now(timezone.utc) - interaction.client.launch_time
-
-        lines = [
-            "staffNinja server status",
-            f"- service: running (process online)",
-            f"- discord gateway: connected ({latency_ms} ms)",
-            f"- database: {db_status} ({db_latency_ms} ms)",
-            f"- host: {socket.gethostname()}",
-            f"- uptime: {str(uptime).split('.')[0]}",
-            f"- checked at: {datetime.now(timezone.utc).isoformat()}",
-        ]
-
-        await self._finish_slash_response(interaction, content="\n".join(lines))
+        content = await sns.get_server_status_text(latency_ms, interaction.client.launch_time)
+        await self._finish_slash_response(interaction, content=content)
 
     @app_commands.command(name="jobs", description="Show job queue status and recent failures")
     async def jobs(self, interaction: discord.Interaction):
@@ -172,178 +99,17 @@ class StaffNinjaGroup(app_commands.Group):
     @app_commands.command(name="event", description="Show event status and related metrics")
     async def event(self, interaction: discord.Interaction):
         await self._begin_slash_response(interaction)
-
-        status_map = {
-            0: "inactive",
-            1: "active",
-        }
-
-        try:
-            event_rows = await Database.fetch(
-                'SELECT "Id", "Name", "Status", "Start", "End", "EventBriteId", "VenueId", "StaffAgreementFormId" FROM "Event" WHERE "Status" = 1 ORDER BY "Id" DESC LIMIT 1'
-            )
-        except Exception as exc:
-            logging.exception("Failed event lookup")
-            await self._finish_slash_response(
-                interaction,
-                content=f"Event lookup failed: {exc.__class__.__name__}",
-            )
-            return
-
-        if not event_rows:
-            await self._finish_slash_response(
-                interaction,
-                content="No active event found (Status = 1).",
-            )
-            return
-
-        event = event_rows[0]
-        selected_event_id = event["Id"]
-
-        try:
-            metrics = await Database.fetch(
-                """
-                SELECT
-                    (SELECT COUNT(*) FROM "AttendeeBadge" WHERE "EventId" = $1) AS attendee_badges,
-                    (SELECT COUNT(*) FROM "Budget" WHERE "EventId" = $1) AS budgets,
-                    (SELECT COUNT(*) FROM "Panel" WHERE "EventId" = $1) AS panels,
-                    (SELECT COUNT(*) FROM "StaffShift" WHERE "EventId" = $1) AS staff_shifts,
-                    (SELECT COUNT(*) FROM "UserEventPreferences" WHERE "EventId" = $1) AS user_preferences,
-                    (SELECT COUNT(*) FROM "Transaction" WHERE "EventId" = $1) AS transactions,
-                    (SELECT COUNT(*) FROM "conExpenseBudget" WHERE "sysEventId" = $1) AS expense_budgets,
-                    (SELECT COUNT(*) FROM "deprecated_regBadge" WHERE "eventId" = $1) AS legacy_badges,
-                    (SELECT COUNT(*) FROM "schSchedule" WHERE "sysEventId" = $1) AS schedules,
-                    (SELECT COUNT(*) FROM "stfEvent" WHERE "eventId" = $1) AS staff_events,
-                    (SELECT COUNT(*) FROM "volAwarded" WHERE "eventId" = $1) AS volunteer_awards,
-                    (SELECT COUNT(*) FROM "volHours" WHERE "eventId" = $1) AS volunteer_hours,
-                    (SELECT COUNT(*) FROM "volRewards" WHERE "eventId" = $1) AS volunteer_rewards
-                """,
-                selected_event_id,
-            )
-            venue = await Database.fetch(
-                'SELECT COALESCE("Name", \'(none)\') AS venue_name FROM "Venue" WHERE "Id" = $1 LIMIT 1',
-                event["VenueId"],
-            )
-        except Exception as exc:
-            logging.exception("Failed event metrics lookup event_id=%s", selected_event_id)
-            await self._finish_slash_response(
-                interaction,
-                content=f"Event metrics lookup failed: {exc.__class__.__name__}",
-            )
-            return
-
-        metric = metrics[0]
-        venue_name = venue[0]["venue_name"] if venue else "(none)"
-        status_code = int(event["Status"]) if event["Status"] is not None else -1
-        status_label = status_map.get(status_code, f"unknown ({status_code})")
-
-        lines = [
-            "staffNinja event status",
-            f"- event id: {selected_event_id}",
-            f"- name: {event['Name']}",
-            f"- status: {status_label}",
-            f"- start: {self._format_event_timestamp(event['Start'])}",
-            f"- end: {self._format_event_timestamp(event['End'])}",
-            f"- eventbrite id: {event['EventBriteId'] if event['EventBriteId'] else '(none)'}",
-            f"- venue: {venue_name}",
-            f"- staff agreement form id: {event['StaffAgreementFormId'] if event['StaffAgreementFormId'] else '(none)'}",
-            "- related table metrics:",
-            f"  attendee badges={metric['attendee_badges']}, budgets={metric['budgets']}, panels={metric['panels']}, staff shifts={metric['staff_shifts']}",
-            f"  user prefs={metric['user_preferences']}, transactions={metric['transactions']}, schedules={metric['schedules']}",
-            f"  expense budgets={metric['expense_budgets']}, legacy badges={metric['legacy_badges']}, staff events={metric['staff_events']}",
-            f"  volunteer awards={metric['volunteer_awards']}, volunteer hours={metric['volunteer_hours']}, volunteer rewards={metric['volunteer_rewards']}",
-        ]
-        await self._finish_slash_response(interaction, content="\n".join(lines))
+        content = await sns.get_formatted_event_status()
+        await self._finish_slash_response(interaction, content=content)
 
     @app_commands.command(name="link", description="Link your Discord account to your staff record by email")
     @app_commands.describe(email="Email address on your staff record")
     async def link(self, interaction: discord.Interaction, email: str):
         await self._begin_slash_response(interaction)
-
-        normalized_email = (email or "").strip().lower()
-        if not normalized_email or "@" not in normalized_email:
-            await self._finish_slash_response(
-                interaction,
-                content="Please provide a valid email address.",
-            )
-            return
-
-        try:
-            matches = await Database.fetch(
-                'SELECT "Id", COALESCE("Discord", \'\') AS discord_value FROM "User" WHERE LOWER(COALESCE("Email", \'\')) = $1',
-                normalized_email,
-            )
-        except Exception as exc:
-            logging.exception("Failed email lookup for link command user_id=%s", getattr(interaction.user, "id", None))
-            await self._finish_slash_response(
-                interaction,
-                content=f"Account lookup failed: {exc.__class__.__name__}",
-            )
-            return
-
-        if not matches:
-            await self._finish_slash_response(
-                interaction,
-                content="No matching account could be verified for that email.",
-            )
-            return
-
-        if len(matches) > 1:
-            await self._finish_slash_response(
-                interaction,
-                content="Multiple accounts matched that email. Please contact an admin.",
-            )
-            return
-
-        row = matches[0]
-        existing_discord = (row["discord_value"] or "").strip()
-        requestor_id = str(interaction.user.id)
-
-        if existing_discord:
-            normalized_existing = existing_discord.lstrip("@").lower()
-            if normalized_existing == requestor_id.lower():
-                await self._finish_slash_response(
-                    interaction,
-                    content="Your Discord account is already linked.",
-                )
-                return
-
-            await self._finish_slash_response(
-                interaction,
-                content=(
-                    "This account is already linked to a Discord identity. "
-                    "Please contact an admin to re-link."
-                ),
-            )
-            return
-
-        code = f"{secrets.randbelow(1_000_000):06d}"
-        expires_at = datetime.now(timezone.utc).timestamp() + (settings.LINK_CODE_TTL_MINUTES * 60)
-
-        try:
-            # Run blocking SMTP call in a thread so it doesn't stall the event loop
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._send_verification_email, normalized_email, code)
-        except Exception as exc:
-            logging.exception("Failed to send link verification email user_id=%s", getattr(interaction.user, "id", None))
-            await self._finish_slash_response(
-                interaction,
-                content=f"Could not send verification email: {exc.__class__.__name__}",
-            )
-            return
-
-        self.pending_link_challenges[int(interaction.user.id)] = {
-            "code": code,
-            "email": normalized_email,
-            "user_id": int(row["Id"]),
-            "expires_at": expires_at,
-            "attempts": 0,
-        }
-
-        await self._finish_slash_response(
-            interaction,
-            content="Verification code sent. Run `/staffninja verify code:<123456>` to complete linking.",
-        )
+        res = await sns.init_link_process(email, str(interaction.user.id))
+        if res["success"]:
+            self.pending_link_challenges[int(interaction.user.id)] = res["pending_data"]
+        await self._finish_slash_response(interaction, content=res["message"])
 
     @app_commands.command(name="verify", description="Verify your email code and complete account linking")
     @app_commands.describe(code="6-digit code sent to your email")
@@ -361,204 +127,17 @@ class StaffNinjaGroup(app_commands.Group):
             )
             return
 
-        if datetime.now(timezone.utc).timestamp() > pending["expires_at"]:
+        res = await sns.verify_link_code(code, requestor_id, pending)
+        if res.get("remove_pending"):
             self.pending_link_challenges.pop(user_id, None)
-            await self._finish_slash_response(
-                interaction,
-                content="Verification code expired. Run `/staffninja link` again.",
-            )
-            return
 
-        submitted = (code or "").strip()
-        if submitted != pending["code"]:
-            pending["attempts"] += 1
-            remaining = settings.LINK_CODE_MAX_ATTEMPTS - pending["attempts"]
-            if remaining <= 0:
-                self.pending_link_challenges.pop(user_id, None)
-                await self._finish_slash_response(
-                    interaction,
-                    content="Too many invalid attempts. Run `/staffninja link` again.",
-                )
-                return
-
-            await self._finish_slash_response(
-                interaction,
-                content=f"Invalid code. {remaining} attempts remaining.",
-            )
-            return
-
-        try:
-            result = await Database.execute(
-                'UPDATE "User" SET "Discord" = $1 WHERE "Id" = $2 AND COALESCE("Discord", \'\') = \'\'',
-                requestor_id,
-                pending["user_id"],
-            )
-        except Exception as exc:
-            logging.exception("Failed to update Discord link for user_id=%s", getattr(interaction.user, "id", None))
-            await self._finish_slash_response(
-                interaction,
-                content=f"Could not update your profile: {exc.__class__.__name__}",
-            )
-            return
-
-        if result != "UPDATE 1":
-            self.pending_link_challenges.pop(user_id, None)
-            await self._finish_slash_response(
-                interaction,
-                content="Could not complete link because the account was updated. Please contact an admin.",
-            )
-            return
-
-        self.pending_link_challenges.pop(user_id, None)
-
-        await self._finish_slash_response(
-            interaction,
-            content="Your Discord account has been linked successfully. You can now run `/staffninja status`.",
-        )
+        await self._finish_slash_response(interaction, content=res["message"])
 
     @app_commands.command(name="status", description="Show your staff profile and status")
     async def staff(self, interaction: discord.Interaction):
         await self._begin_slash_response(interaction)
-
-        user = interaction.user
-        handle_candidates = {
-            str(user.id).strip().lower(),
-            str(user.name).strip().lower(),
-            str(getattr(user, "global_name", "") or "").strip().lower(),
-            str(getattr(user, "display_name", "") or "").strip().lower(),
-        }
-        handle_candidates = {h.lstrip("@") for h in handle_candidates if h}
-
-        query = """
-            SELECT
-                u."Id" AS user_id,
-                COALESCE(u."FirstName", '') AS first_name,
-                COALESCE(u."LastName", '') AS last_name,
-                COALESCE(u."PreferredFirstName", '') AS preferred_first_name,
-                COALESCE(u."PreferredLastName", '') AS preferred_last_name,
-                COALESCE(u."Discord", '') AS discord_value,
-                u."Email" AS email,
-                u."Phone" AS phone,
-                u."BirthDate" AS birth_date,
-                u."Allergy" AS allergies,
-                u."YearJoined" AS year_joined,
-                u."Status" AS status_code,
-                COALESCE(string_agg(DISTINCT sp."Name", ', '), 'None') AS staff_positions,
-                COALESCE(BOOL_OR(sp."LeadershipPosition"), FALSE) AS is_leadership
-            FROM "User" u
-            LEFT JOIN "UserStaffPosition" usp ON usp."UserId" = u."Id"
-            LEFT JOIN "StaffPosition" sp ON sp."Id" = usp."StaffPositionId"
-            WHERE LOWER(TRIM(BOTH '@' FROM COALESCE(u."Discord", ''))) = ANY($1::text[])
-            GROUP BY u."Id", u."FirstName", u."LastName", u."PreferredFirstName", u."PreferredLastName", u."Discord", u."Email", u."Phone", u."BirthDate", u."Allergy", u."YearJoined", u."Status"
-            ORDER BY u."Id"
-            LIMIT 1
-        """
-
-        try:
-            rows = await Database.fetch(query, list(handle_candidates))
-        except Exception as exc:
-            logging.exception("Failed staff lookup for user_id=%s", getattr(user, "id", None))
-            await self._finish_slash_response(
-                interaction,
-                content=f"Staff lookup failed: {exc.__class__.__name__}",
-            )
-            return
-
-        if not rows:
-            await self._finish_slash_response(
-                interaction,
-                content=(
-                    "No staff record matched your Discord identity. "
-                    "Run `/staffninja link email:<you@example.com>` to link your account."
-                ),
-            )
-            return
-
-        row = rows[0]
-        status_map = {
-            0: "inactive",
-            1: "active",
-            2: "pending",
-        }
-        status_code = int(row["status_code"]) if row["status_code"] is not None else -1
-        status_label = status_map.get(status_code, f"unknown ({status_code})")
-
-        full_name = f"{row['first_name']} {row['last_name']}".strip() or "(no name set)"
-        email = row["email"] or "(none)"
-        preferred_full_name = f"{row['preferred_first_name']} {row['preferred_last_name']}".strip() or "(none)"
-        phone = row["phone"] or "(none)"
-        birth_date = str(row["birth_date"]) if row["birth_date"] else "(none)"
-        allergies = row["allergies"] or "(none)"
-        year_joined = str(row["year_joined"]) if row["year_joined"] is not None else "(none)"
-
-        try:
-            agreement_rows = await Database.fetch(
-                """
-                SELECT
-                    e."Id" AS event_id,
-                    COALESCE(e."Name", '') AS event_name,
-                    e."StaffAgreementFormId" AS staff_agreement_form_id,
-                    COALESCE(f."Title", '') AS staff_agreement_form_title,
-                    cf."Id" AS completed_form_id,
-                    COALESCE(cf."EditedDate", cf."CreatedDate") AS completed_at
-                FROM "Event" e
-                LEFT JOIN "Form" f ON f."Id" = e."StaffAgreementFormId"
-                LEFT JOIN LATERAL (
-                    SELECT "Id", "EditedDate", "CreatedDate"
-                    FROM "CompletedForm"
-                    WHERE "FormId" = e."StaffAgreementFormId"
-                      AND "UserId" = $1
-                    ORDER BY COALESCE("EditedDate", "CreatedDate") DESC NULLS LAST, "Id" DESC
-                    LIMIT 1
-                ) cf ON TRUE
-                WHERE e."Status" = 1
-                ORDER BY e."Id" DESC
-                LIMIT 1
-                """,
-                row["user_id"],
-            )
-        except Exception as exc:
-            logging.exception("Failed staff agreement lookup for user_id=%s", row["user_id"])
-            await self._finish_slash_response(
-                interaction,
-                content=f"Staff agreement lookup failed: {exc.__class__.__name__}",
-            )
-            return
-
-        if not agreement_rows:
-            staff_agreement_status = "no active event found"
-        else:
-            agreement = agreement_rows[0]
-            event_name = agreement["event_name"] or f"event {agreement['event_id']}"
-            form_id = agreement["staff_agreement_form_id"]
-            form_title = agreement["staff_agreement_form_title"] or "staff agreement"
-            completed_form_id = agreement["completed_form_id"]
-
-            if not form_id:
-                staff_agreement_status = f"not configured for {event_name}"
-            elif completed_form_id:
-                completed_at = self._format_db_timestamp(agreement["completed_at"])
-                staff_agreement_status = f"agreed for {event_name} ({form_title}) on {completed_at}"
-            else:
-                staff_agreement_status = f"not yet agreed for {event_name} ({form_title})"
-
-        lines = [
-            "staffNinja staff profile",
-            f"- user id: {row['user_id']}",
-            f"- name: {full_name}",
-            f"- preferred name: {preferred_full_name}",
-            f"- discord mapping: {row['discord_value'] or '(none)'}",
-            f"- status: {status_label}",
-            f"- leadership: {'yes' if row['is_leadership'] else 'no'}",
-            f"- staff positions: {row['staff_positions']}",
-            f"- email: {email}",
-            f"- phone: {phone}",
-            f"- birth day: {birth_date}",
-            f"- alergys: {allergies}",
-            f"- year joined: {year_joined}",
-            f"- staff agreement: {staff_agreement_status}",
-        ]
-        await self._finish_slash_response(interaction, content="\n".join(lines))
+        content = await sns.get_formatted_staff_profile(interaction.user)
+        await self._finish_slash_response(interaction, content=content)
 
 
     # ---- mailing list command ----
@@ -672,6 +251,7 @@ class StaffNinjaGroup(app_commands.Group):
         clean_question = (question or "").strip()
         search_query = self._build_policy_search_query(clean_question)
         question_terms = self._extract_query_terms(clean_question)
+        score_terms = question_terms or self._extract_query_terms(search_query)
         user_id = getattr(interaction.user, "id", None)
         guild_id = interaction.guild_id
         channel_id = interaction.channel_id
@@ -721,54 +301,18 @@ class StaffNinjaGroup(app_commands.Group):
             search_query,
         )
 
-        used_fallback = False
-        like_terms: list[str] = []
-        query_candidates = [q for q in [clean_question, search_query] if q and q.strip()]
-        deduped_queries: list[str] = []
-        seen_queries = set()
-        for q in query_candidates:
-            normalized = q.strip().lower()
-            if normalized not in seen_queries:
-                seen_queries.add(normalized)
-                deduped_queries.append(q)
-
-        docs_by_id: dict[int, dict] = {}
         try:
-            for search_candidate in deduped_queries:
-                candidate_docs = await Database.fetch(
-                    """
-                    SELECT
-                        "Id",
-                        COALESCE("Title", '') AS title,
-                        COALESCE("Category", '') AS category,
-                        COALESCE("Version", '') AS version,
-                        ts_rank_cd(
-                            to_tsvector(
-                                'english',
-                                COALESCE("Title", '') || ' ' || COALESCE("Category", '') || ' ' || COALESCE("DocumentValue", '')
-                            ),
-                            plainto_tsquery('english', $1)
-                        ) AS rank
-                    FROM "Document"
-                    ORDER BY rank DESC, "EditedDate" DESC NULLS LAST
-                    """,
-                    search_candidate,
-                )
-
-                for row in candidate_docs:
-                    doc_id = int(row["Id"])
-                    rank = float(row["rank"] or 0.0)
-                    current = docs_by_id.get(doc_id)
-                    if not current or rank > float(current.get("rank") or 0.0):
-                        docs_by_id[doc_id] = row
-
-            docs = list(docs_by_id.values())
-            logging.debug(
-                "Policy full-text lookup completed: user_id=%s doc_count=%s query_count=%s",
-                user_id,
-                len(docs),
-                len(deduped_queries),
+            docs_with_text = await _svc_search_documents(
+                question=clean_question,
+                deep_limit=self.POLICY_DEEP_ANALYZE_LIMIT,
+                context_limit=self.POLICY_CONTEXT_LIMIT
             )
+            if not docs_with_text:
+                await self._finish_slash_response(
+                    interaction,
+                    content="I can only answer from the Document table and found no matching policy text.",
+                )
+                return
         except Exception as exc:
             logging.exception("Policy document lookup failed")
             await self._finish_slash_response(
@@ -777,121 +321,8 @@ class StaffNinjaGroup(app_commands.Group):
             )
             return
 
-        if not docs:
-            # Fallback for natural-language phrasing that may miss full-text search tokenization.
-            fallback_terms = question_terms + [t for t in self._extract_query_terms(search_query) if t not in question_terms]
-            tokens = [t for t in fallback_terms if len(t.strip()) >= 2][:16]
-            like_terms = [f"%{t.strip()}%" for t in tokens if t.strip()]
-            if like_terms:
-                used_fallback = True
-                try:
-                    docs = await Database.fetch(
-                        """
-                        SELECT
-                            "Id",
-                            COALESCE("Title", '') AS title,
-                            COALESCE("Category", '') AS category,
-                            COALESCE("Version", '') AS version,
-                            0.0::float AS rank
-                        FROM "Document"
-                        WHERE COALESCE("Title", '') ILIKE ANY($1::text[])
-                           OR COALESCE("Category", '') ILIKE ANY($1::text[])
-                           OR COALESCE("DocumentValue", '') ILIKE ANY($1::text[])
-                        ORDER BY "EditedDate" DESC NULLS LAST
-                        """,
-                        like_terms,
-                    )
-                    logging.debug(
-                        "Policy fallback lookup completed: user_id=%s like_terms=%s doc_count=%s",
-                        user_id,
-                        like_terms,
-                        len(docs),
-                    )
-                except Exception as exc:
-                    logging.exception("Policy document fallback lookup failed")
-                    await self._finish_slash_response(
-                        interaction,
-                        content=f"Document lookup failed: {exc.__class__.__name__}",
-                    )
-                    return
-
-        if not docs:
-            logging.info(
-                "Policy question had no matching docs: user_id=%s search_query=%s used_fallback=%s like_terms=%s",
-                user_id,
-                search_query,
-                used_fallback,
-                like_terms,
-            )
-            await self._finish_slash_response(
-                interaction,
-                content="I can only answer from the Document table and found no matching policy text.",
-            )
-            return
-
-        score_terms = question_terms or self._extract_query_terms(search_query)
-
-        def _rank_metadata(row: dict) -> tuple[float, float]:
-            title = (row.get("title") or "").lower()
-            category = (row.get("category") or "").lower()
-            base_rank = float(row.get("rank") or 0.0)
-
-            title_hits = sum(1 for t in score_terms if t in title)
-            category_hits = sum(1 for t in score_terms if t in category)
-            score = (base_rank * 20.0) + (title_hits * 5.0) + (category_hits * 3.0)
-            return score, base_rank
-
-        ranked_docs = sorted(docs, key=_rank_metadata, reverse=True)
-        policy_scan_count = len(ranked_docs)
-        deep_candidates = ranked_docs[: self.POLICY_DEEP_ANALYZE_LIMIT]
-        deep_ids = [int(r["Id"]) for r in deep_candidates]
-
-        docs_with_text: list[dict] = []
-        if deep_ids:
-            try:
-                detailed_rows = await Database.fetch(
-                    """
-                    SELECT
-                        "Id",
-                        COALESCE("DocumentValue", '') AS document_value
-                    FROM "Document"
-                    WHERE "Id" = ANY($1::int[])
-                    ORDER BY array_position($1::int[], "Id")
-                    """,
-                    deep_ids,
-                )
-                detailed_by_id = {int(r["Id"]): r for r in detailed_rows}
-
-                for meta in deep_candidates:
-                    doc_id = int(meta["Id"])
-                    detailed = detailed_by_id.get(doc_id)
-                    if not detailed:
-                        continue
-
-                    merged = dict(meta)
-                    merged["document_value"] = detailed.get("document_value") or ""
-                    docs_with_text.append(merged)
-            except Exception as exc:
-                logging.exception("Policy deep document lookup failed")
-                await self._finish_slash_response(
-                    interaction,
-                    content=f"Document lookup failed: {exc.__class__.__name__}",
-                )
-                return
-
-        if not docs_with_text:
-            logging.info(
-                "Policy question had no deep candidates: user_id=%s search_query=%s used_fallback=%s like_terms=%s",
-                user_id,
-                search_query,
-                used_fallback,
-                like_terms,
-            )
-            await self._finish_slash_response(
-                interaction,
-                content="I can only answer from the Document table and found no matching policy text.",
-            )
-            return
+        policy_scan_count = len(docs_with_text)
+        deep_candidates = docs_with_text
 
         def _rank_row(row: dict) -> tuple[float, float]:
             title = (row.get("title") or "").lower()
@@ -946,7 +377,6 @@ class StaffNinjaGroup(app_commands.Group):
             policy_scan_count,
             len(deep_candidates),
             len(docs),
-            used_fallback,
             doc_debug_rows,
         )
 
